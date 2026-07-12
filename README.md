@@ -1,4 +1,4 @@
-# maimai Rhythm Analysis
+# Maimai Rhythm Analysis
 
 把 maimai 的 `maidata.txt` 谱面转成可视化的节奏分析结果：节奏图、预览视频、可交互的前端分析页面，支持自动音频对齐。
 
