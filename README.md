@@ -69,20 +69,15 @@ Re:MASTER 对应 `outputs/ReMASTER/`。
 
 ## 下载使用
 
-从 [Releases](../../releases) 下载 `maimai-analysis.zip`，解压后：
+从 [Releases](../../releases) 下载 `maimai-analysis.zip`，解压后双击 `run_all.bat` 即可使用。无需安装 Python 或 FFmpeg，已内置 MajdataView 和 FFmpeg。
+
+把歌曲放入 `songs/` 目录：
 
 ```
-解压目录/
-├── run_all.bat          ← 双击使用
-├── songs/               ← 把歌曲放这里
-│   └── 某首歌/
-│       ├── maidata.txt
-│       └── track.mp3
-├── mra/
-└── .tools/              # MajdataView + FFmpeg（已内置）
+songs/某首歌/maidata.txt + track.mp3 → 双击 run_all.bat
 ```
 
-无需安装 Python 或 FFmpeg，解压即用。
+构建 Release 包：`powershell -ExecutionPolicy Bypass -File pack.ps1`，上传到 Releases 页面。
 
 ## 测试
 
