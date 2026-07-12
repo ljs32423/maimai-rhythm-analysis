@@ -11,11 +11,6 @@ python -m mra.run_all -d "QZKago Requiem"
 
 完成后在 `songs/QZKago Requiem/outputs/MASTER/html/analysis.html` 打开分析页面。
 
-## 运行环境
-
-- Windows + Python 3.10+
-- FFmpeg（需在 PATH 中）
-
 ## 歌曲目录
 
 ```
