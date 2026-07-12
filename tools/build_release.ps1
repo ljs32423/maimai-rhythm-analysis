@@ -9,9 +9,9 @@ $release = Join-Path $project "release"
 $app = Join-Path $release "app"
 $required = Join-Path $release "required-programs"
 
-if (Test-Path $release) {
-    Remove-Item $release -Recurse -Force
-}
+# 只清理 app 和 required-programs，保留 runtime/
+if (Test-Path $app) { Remove-Item $app -Recurse -Force }
+if (Test-Path $required) { Remove-Item $required -Recurse -Force }
 
 New-Item -ItemType Directory -Path `
     $app, `
@@ -33,25 +33,27 @@ Copy-Item `
 Copy-Item (Join-Path $project ".tools\majdata") -Destination (Join-Path $required ".tools") -Recurse
 Copy-Item (Join-Path $project ".tools\majdata_bridge") -Destination (Join-Path $required ".tools") -Recurse
 
+# 复制 ffmpeg 到 required-programs (如果需要独立分发)
+$ffmpegSrc = Join-Path $project ".tools\majdata\4.3.1\Majdata\MajdataView_Data\StreamingAssets"
+if (Test-Path (Join-Path $ffmpegSrc "ffmpeg.exe")) {
+    Copy-Item (Join-Path $ffmpegSrc "ffmpeg.exe") (Join-Path $required ".tools\ffmpeg") -ErrorAction SilentlyContinue
+    Copy-Item (Join-Path $ffmpegSrc "ffprobe.exe") (Join-Path $required ".tools\ffmpeg") -ErrorAction SilentlyContinue
+}
+
+# run_all.bat — 使用便携 Python (runtime/python/python.exe)
 $runAllBat = @'
 @echo off
 setlocal
 
 set "APP_DIR=%~dp0"
-set "RUNTIME_DIR=%APP_DIR%..\required-programs"
-set "RUNTIME_TOOLS=%RUNTIME_DIR%\.tools"
-set "MAJDATA_DIR=%RUNTIME_TOOLS%\majdata\4.3.1\Majdata"
-set "FFMPEG_BIN=%MAJDATA_DIR%"
+set "ROOT=%APP_DIR%.."
+set "PYTHON=%ROOT%\runtime\python\python.exe"
+set "MAJDATA=%ROOT%\required-programs\.tools\majdata\4.3.1\Majdata"
 
-if exist "%MAJDATA_DIR%\MajdataView.exe" (
-    set "MAJDATA_HOME=%MAJDATA_DIR%"
-)
+if exist "%MAJDATA%\ffmpeg.exe" set "PATH=%MAJDATA%;%PATH%"
+if exist "%MAJDATA%\MajdataView.exe" set "MAJDATA_HOME=%MAJDATA%"
 
-if exist "%FFMPEG_BIN%\ffmpeg.exe" (
-    set "PATH=%FFMPEG_BIN%;%PATH%"
-)
-
-python -m mra.run_all %*
+"%PYTHON%" -m mra.run_all %*
 exit /b %errorlevel%
 '@
 
@@ -100,5 +102,27 @@ $requiredReadme = @'
 Set-Content -Path (Join-Path $app "run_all.bat") -Value $runAllBat -Encoding ASCII
 Set-Content -Path (Join-Path $app "songs\把歌曲放到这里.txt") -Value $songsNote -Encoding UTF8
 Set-Content -Path (Join-Path $required "README.txt") -Value $requiredReadme -Encoding UTF8
+
+# 开始使用.bat
+$startBat = @'
+@echo off
+chcp 65001 >nul
+setlocal
+cd /d "%~dp0"
+
+echo Maimai Rhythm Analysis
+echo.
+echo 1. 把歌曲文件夹放到当前目录的 songs 文件夹里。
+echo    每首歌至少需要 maidata.txt、track.mp3。
+echo.
+echo 2. 如果要处理全部歌曲，直接按回车。
+echo    如果要处理单曲，可以关闭本窗口后运行：
+echo    run_all.bat -d "歌曲名"
+echo.
+pause
+call "%~dp0run_all.bat" %*
+pause
+'@
+Set-Content -Path (Join-Path $app "开始使用.bat") -Value $startBat -Encoding ASCII
 
 Write-Host "Release rebuilt at: $release"
