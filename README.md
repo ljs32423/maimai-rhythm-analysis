@@ -9,7 +9,7 @@ pip install -r requirements.txt
 python -m mra.run_all -d "QZKago Requiem"
 ```
 
-完成后在 `songs/QZKago Requiem/outputs/MASTER/html/analysis.html` 打开分析页面。
+完成后在 `songs/QZKago Requiem/outputs/MASTER/html/analysis.html` 打开分析页面，即可查看节奏解析。
 
 ## 歌曲目录
 
@@ -44,10 +44,6 @@ python -m mra.render_preview -d "曲名" -diff 5 -f  # 只录预览视频
 python -m mra.align_audio -d "曲名" -diff 5    # 只算音频偏移
 python -m mra.make_html   -d "曲名" -diff 5 -f # 只生成分析页面
 ```
-
-## 分析页面功能
-
-`analysis.html` 支持播放、拖拽进度条、方向键 ±1s、0.01 精度倍速、节奏滚动条与视频同步。
 
 ## 输出结构
 
