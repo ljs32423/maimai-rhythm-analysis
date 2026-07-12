@@ -22,7 +22,7 @@ python -m mra.run_all -d "QZKago Requiem"
 songs/
 └── 某首歌/
     ├── maidata.txt    # 谱面
-    ├── track.mp3      # 音频（自动对齐必需）
+    ├── track.mp3      # 音频
     ├── bg.png         # 背景图（可选）
     └── pv.mp4         # PV 视频（可选）
 ```
@@ -67,9 +67,22 @@ python -m mra.make_html   -d "曲名" -diff 5 -f # 只生成分析页面
 
 Re:MASTER 对应 `outputs/ReMASTER/`。
 
-## 发行包
+## 下载使用
 
-运行 `tools/build_release.ps1` 生成 `release/` 目录。解压后无需安装 Python，双击 `run_all.bat` 即可使用。
+从 [Releases](../../releases) 下载 `maimai-analysis.zip`，解压后：
+
+```
+解压目录/
+├── run_all.bat          ← 双击使用
+├── songs/               ← 把歌曲放这里
+│   └── 某首歌/
+│       ├── maidata.txt
+│       └── track.mp3
+├── mra/
+└── .tools/              # MajdataView + FFmpeg（已内置）
+```
+
+无需安装 Python 或 FFmpeg，解压即用。
 
 ## 测试
 
