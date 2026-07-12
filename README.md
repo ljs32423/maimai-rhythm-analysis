@@ -59,7 +59,7 @@ python -m mra.make_html   -d "曲名" -diff 5 -f # 只生成分析页面
 ```
 歌曲文件夹/outputs/MASTER/
 ├── html/analysis.html      # 分析页面
-├── video/preview.mp4       # 预览视频（2560×1440 60fps，PV 默认关闭）
+├── video/preview.mp4       # 预览视频
 ├── sync/offset.txt         # 音频对齐偏移
 ├── rhythm/rhythm.{png,svg} # 节奏图
 └── strip/strip.svg         # 滚动条素材
