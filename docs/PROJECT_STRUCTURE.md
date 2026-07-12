@@ -6,6 +6,11 @@
 
 - `README.md`
 - `requirements.txt`
+- `run_all.py`
+- `visualize.py`
+- `render_preview.py`
+- `align_audio.py`
+- `make_html.py`
 - `songs/`
 - `tests/`
 - `docs/`
@@ -42,10 +47,10 @@ python -m mra.make_html -d "Song Name"
 
 ## songs/
 
-每首歌一个目录，目录内同时放：
+本地歌曲库，不提交到 Git。每首歌一个目录，目录内同时放：
 
 - 原始输入：`maidata.txt`、`track.mp3`、`pv.mp4`、`bg.png`
-- 生成结果：`*_rhythm.png`、`*_rhythm.svg`、`*_strip.svg`、`*_preview.mp4`、`*_offset.txt`、`*_analysis.html`
+- 生成结果：`outputs/`
 
 ## tests/
 
@@ -61,8 +66,8 @@ Python 自动化测试。
 
 ## 清理原则
 
-Python 实现统一放在 `mra/`，根目录不再保留同名入口脚本：
+Python 实现统一放在 `mra/`，根目录只保留薄 Python 入口脚本，方便直接运行：
 
 - 运行时统一使用 `python -m mra.xxx`
 - 测试直接针对 `mra/` 里的实现模块
-- 根目录更干净
+- 不在仓库中保留 release 构建产物或压缩包

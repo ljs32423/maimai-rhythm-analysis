@@ -14,7 +14,7 @@ python -m mra.run_all -d "QZKago Requiem"
 ## 运行环境
 
 - Windows + Python 3.10+
-- FFmpeg（需在 PATH 中；或使用发行包，会复用 MajdataView 自带的 ffmpeg）
+- FFmpeg（需在 PATH 中）
 
 ## 歌曲目录
 
@@ -66,18 +66,6 @@ python -m mra.make_html   -d "曲名" -diff 5 -f # 只生成分析页面
 ```
 
 Re:MASTER 对应 `outputs/ReMASTER/`。
-
-## 下载使用
-
-从 [Releases](../../releases) 下载 `maimai-analysis.zip`，解压后双击 `run_all.bat` 即可使用。无需安装 Python 或 FFmpeg，已内置 MajdataView 和 FFmpeg。
-
-把歌曲放入 `songs/` 目录：
-
-```
-songs/某首歌/maidata.txt + track.mp3 → 双击 run_all.bat
-```
-
-构建 Release 包：`powershell -ExecutionPolicy Bypass -File pack.ps1`，上传到 Releases 页面。
 
 ## 测试
 
