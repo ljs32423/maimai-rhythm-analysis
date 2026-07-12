@@ -11,6 +11,7 @@ songs/**/outputs/
 release/
 *.npy
 *.npz
+*.zip
 .cache/
 
 *_rhythm.png

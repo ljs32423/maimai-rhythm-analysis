@@ -8,10 +8,12 @@ $project = (Resolve-Path $ProjectRoot).Path
 $release = Join-Path $project "release"
 $app = Join-Path $release "app"
 $required = Join-Path $release "required-programs"
+$runtime = Join-Path $release "runtime"
 
 # 只清理 app 和 required-programs，保留 runtime/
 if (Test-Path $app) { Remove-Item $app -Recurse -Force }
 if (Test-Path $required) { Remove-Item $required -Recurse -Force }
+New-Item -ItemType Directory -Path $release -Force | Out-Null
 
 New-Item -ItemType Directory -Path `
     $app, `
@@ -32,28 +34,53 @@ Copy-Item `
 
 Copy-Item (Join-Path $project ".tools\majdata") -Destination (Join-Path $required ".tools") -Recurse
 Copy-Item (Join-Path $project ".tools\majdata_bridge") -Destination (Join-Path $required ".tools") -Recurse
+Get-ChildItem (Join-Path $required ".tools") -Recurse -Directory -Filter "Majdata.backup-*" |
+    Remove-Item -Recurse -Force
 
-# 复制 ffmpeg 到 required-programs (如果需要独立分发)
+# 复制 ffmpeg / ffprobe 到 required-programs，run_all.bat 会优先使用 Majdata 自带 ffmpeg。
 $ffmpegSrc = Join-Path $project ".tools\majdata\4.3.1\Majdata\MajdataView_Data\StreamingAssets"
+$ffmpegDest = Join-Path $required ".tools\ffmpeg\bin"
 if (Test-Path (Join-Path $ffmpegSrc "ffmpeg.exe")) {
-    Copy-Item (Join-Path $ffmpegSrc "ffmpeg.exe") (Join-Path $required ".tools\ffmpeg") -ErrorAction SilentlyContinue
-    Copy-Item (Join-Path $ffmpegSrc "ffprobe.exe") (Join-Path $required ".tools\ffmpeg") -ErrorAction SilentlyContinue
+    New-Item -ItemType Directory -Path $ffmpegDest -Force | Out-Null
+    Copy-Item (Join-Path $ffmpegSrc "ffmpeg.exe") $ffmpegDest -ErrorAction SilentlyContinue
+    Copy-Item (Join-Path $ffmpegSrc "ffprobe.exe") $ffmpegDest -ErrorAction SilentlyContinue
 }
 
-# run_all.bat — 使用便携 Python (runtime/python/python.exe)
+# run_all.bat - 使用便携 Python (runtime/python/python.exe)
 $runAllBat = @'
 @echo off
 setlocal
 
 set "APP_DIR=%~dp0"
+cd /d "%APP_DIR%"
+
 set "ROOT=%APP_DIR%.."
-set "PYTHON=%ROOT%\runtime\python\python.exe"
-set "MAJDATA=%ROOT%\required-programs\.tools\majdata\4.3.1\Majdata"
+set "PYTHON_EXE=%ROOT%\runtime\python\python.exe"
+set "RUNTIME_TOOLS=%ROOT%\required-programs\.tools"
+set "MAJDATA_DIR=%RUNTIME_TOOLS%\majdata\4.3.1\Majdata"
+set "MAJDATA_FFMPEG_BIN=%MAJDATA_DIR%\MajdataView_Data\StreamingAssets"
+set "FFMPEG_BIN=%RUNTIME_TOOLS%\ffmpeg\bin"
+set "PYTHONWARNINGS=ignore::SyntaxWarning"
 
-if exist "%MAJDATA%\ffmpeg.exe" set "PATH=%MAJDATA%;%PATH%"
-if exist "%MAJDATA%\MajdataView.exe" set "MAJDATA_HOME=%MAJDATA%"
+if exist "%MAJDATA_DIR%\MajdataView.exe" (
+    set "MAJDATA_HOME=%MAJDATA_DIR%"
+)
 
-"%PYTHON%" -m mra.run_all %*
+if exist "%MAJDATA_FFMPEG_BIN%\ffmpeg.exe" (
+    set "PATH=%MAJDATA_FFMPEG_BIN%;%PATH%"
+)
+
+if exist "%FFMPEG_BIN%\ffprobe.exe" (
+    set "PATH=%FFMPEG_BIN%;%PATH%"
+)
+
+if not exist "%PYTHON_EXE%" (
+    echo Embedded Python not found: "%PYTHON_EXE%"
+    echo Please keep runtime\python next to app and required-programs.
+    exit /b 1
+)
+
+"%PYTHON_EXE%" -m mra.run_all %*
 exit /b %errorlevel%
 '@
 
@@ -124,5 +151,13 @@ call "%~dp0run_all.bat" %*
 pause
 '@
 Set-Content -Path (Join-Path $app "开始使用.bat") -Value $startBat -Encoding ASCII
+
+Get-ChildItem $app -Recurse -Directory -Filter "__pycache__" | Remove-Item -Recurse -Force
+Get-ChildItem $app -Recurse -File -Include "*.pyc", "*.pyo" | Remove-Item -Force
+
+if (-not (Test-Path (Join-Path $runtime "python\python.exe"))) {
+    Write-Warning "Portable Python is missing: $runtime\python\python.exe"
+    Write-Warning "Keep an existing release\runtime folder or add portable Python before packing."
+}
 
 Write-Host "Release rebuilt at: $release"
