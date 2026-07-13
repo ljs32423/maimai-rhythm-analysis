@@ -10,10 +10,11 @@ powershell -ExecutionPolicy Bypass -File .\tools\setup_tools.ps1
 python -m mra.run_all -d "QZKago Requiem"
 ```
 
-工具安装脚本会从 [MajdataView v4.3.1 官方发布页](https://github.com/LingFeng-bbben/MajdataView/releases/tag/v4.3.1)
-下载并校验 Majdata，然后使用仓库中的源码构建 Majdata Bridge。生成内容保存在
-`.tools/`，无需提交数百 MB 的第三方二进制文件。需要 .NET 8 SDK；重复运行会复用
-已安装的工具。
+工具安装脚本会从 [MajdataViewX v6.0.0 官方发布页](https://github.com/re-poem/MajdataViewX/releases/tag/v6.0.0)
+下载并校验 MajdataViewX，并从 [ffprobe-static b6.1.1](https://github.com/eugeneware/ffmpeg-static/releases/tag/b6.1.1)
+下载并校验 Windows x64 `ffprobe.exe`。生成内容保存在 `.tools/`，无需提交数百 MB
+的第三方二进制文件；重复运行会复用已安装的工具。旧 MajdataView HTTP 接口与
+Majdata Bridge 仅作为已有手工安装的兼容路径保留，新安装和录制使用 MajdataViewX。
 
 项目首次处理某个难度时会生成一份默认 `4/4` 的 `meter.json`，之后可以人工加入变拍节点。
 

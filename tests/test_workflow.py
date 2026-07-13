@@ -1,4 +1,7 @@
+import gzip
+import hashlib
 import os
+import shutil
 import sys
 import tempfile
 import unittest
@@ -133,8 +136,8 @@ class WorkflowTests(unittest.TestCase):
     def test_default_majdata_home_prefers_sibling_required_programs(self):
         with tempfile.TemporaryDirectory() as tmp:
             app_root = Path(tmp) / "app"
-            sibling_tools = Path(tmp) / "required-programs" / ".tools" / "majdata" / render_preview.MAJDATA_VERSION / "Majdata"
-            local_tools = app_root / ".tools" / "majdata" / render_preview.MAJDATA_VERSION / "Majdata"
+            sibling_tools = Path(tmp) / "required-programs" / ".tools" / "majdataviewx" / render_preview.MAJDATA_VERSION
+            local_tools = app_root / ".tools" / "majdataviewx" / render_preview.MAJDATA_VERSION
             sibling_tools.mkdir(parents=True)
             local_tools.mkdir(parents=True)
             (sibling_tools / "MajdataView.exe").write_bytes(b"x")
@@ -536,31 +539,61 @@ class WorkflowTests(unittest.TestCase):
             self.assertEqual(output.read_text(encoding="utf-8"), original)
             extract.assert_not_called()
 
-    def test_render_preview_install_only_installs_viewer_and_builds_bridge(self):
-        viewer = Path("C:/tools/Majdata")
-        bridge = Path("C:/tools/MajdataBridge.exe")
+    def test_render_preview_install_only_installs_viewer_and_ffprobe(self):
+        viewer = Path("C:/tools/MajdataViewX")
+        ffprobe = Path("C:/tools/ffprobe.exe")
         with mock.patch.object(sys, "argv", ["render_preview.py", "--install-only"]), \
              mock.patch.object(render_preview, "install_majdata_view", return_value=viewer) as install, \
-             mock.patch.object(render_preview, "build_bridge", return_value=bridge) as build, \
+             mock.patch.object(render_preview, "install_ffprobe", return_value=ffprobe) as install_probe, \
              mock.patch("builtins.print"):
             result = render_preview.main()
 
         self.assertEqual(result, 0)
         install.assert_called_once_with()
-        build.assert_called_once_with()
+        install_probe.assert_called_once_with()
 
-    def test_majdata_installer_extracts_archive_into_version_directory(self):
+    def test_ffprobe_installer_downloads_verifies_and_decompresses_binary(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp) / ".tools"
-            archive = root / "downloads" / "Majdata-4.3.1.7z"
+            source_archive = Path(tmp) / "source.gz"
+            source_license = Path(tmp) / "source.LICENSE"
+            executable_bytes = b"fake static ffprobe executable"
+            with gzip.open(source_archive, "wb") as stream:
+                stream.write(executable_bytes)
+            source_license.write_bytes(b"GPL test license")
+
+            archive_sha = render_preview._file_sha256(source_archive)
+            executable_sha = hashlib.sha256(executable_bytes).hexdigest()
+            license_sha = render_preview._file_sha256(source_license)
+
+            def fake_download(url, destination):
+                source = source_archive if url == "archive-url" else source_license
+                shutil.copy2(source, destination)
+
+            with mock.patch.object(render_preview, "LOCAL_TOOLS_ROOT", root), \
+                 mock.patch.object(render_preview, "FFPROBE_ARCHIVE_URL", "archive-url"), \
+                 mock.patch.object(render_preview, "FFPROBE_LICENSE_URL", "license-url"), \
+                 mock.patch.object(render_preview, "FFPROBE_ARCHIVE_SHA256", archive_sha), \
+                 mock.patch.object(render_preview, "FFPROBE_EXE_SHA256", executable_sha), \
+                 mock.patch.object(render_preview, "FFPROBE_LICENSE_SHA256", license_sha), \
+                 mock.patch.object(render_preview.urllib.request, "urlretrieve", side_effect=fake_download):
+                installed = render_preview.install_ffprobe()
+
+            self.assertEqual(installed.read_bytes(), executable_bytes)
+            self.assertEqual((installed.parent / "LICENSE").read_bytes(), b"GPL test license")
+
+    def test_majdataviewx_installer_extracts_archive_into_version_directory(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / ".tools"
+            archive = root / "downloads" / "MajdataViewX-6.0.0.zip"
             archive.parent.mkdir(parents=True)
             archive.write_bytes(b"verified archive")
-            expected_home = root / "majdata" / "4.3.1" / "Majdata"
+            expected_home = root / "majdataviewx" / "6.0.0"
 
             def fake_extract(command, check):
                 self.assertTrue(check)
-                self.assertEqual(Path(command[-1]), root / "majdata" / "4.3.1")
-                expected_home.mkdir(parents=True)
+                self.assertEqual(Path(command[-1]), expected_home)
+                expected_home.mkdir(parents=True, exist_ok=True)
                 (expected_home / "MajdataView.exe").write_bytes(b"viewer")
 
             with mock.patch.object(render_preview, "LOCAL_TOOLS_ROOT", root), \
