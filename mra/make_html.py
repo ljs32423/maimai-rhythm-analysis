@@ -108,6 +108,12 @@ def generate_html(song_dir, song_id, diff_id=5, offset=0.0):
     measure_boundaries = meter_map.boundaries(0.0, total_beats)
     if not measure_boundaries:
         measure_boundaries = [0.0]
+    meter_sections = [
+        {"start_beat": section["start_beat"], "signature": section["signature"]}
+        for section in meter_map.signature_sections()
+    ]
+    if not meter_sections:
+        meter_sections = [{"start_beat": 0.0, "signature": "4/4"}]
 
     # timing 数据
     timings_js = build_timing_segments(ch)
@@ -389,6 +395,20 @@ body {{
     color: rgba(191,195,211,0.68); font-family: Consolas, monospace;
     font-size: 9px; font-style: normal; font-variant-numeric: tabular-nums;
 }}
+.meter-status {{
+    display: flex; align-items: baseline; gap: 5px; flex: 0 0 auto;
+    min-width: 68px; height: 28px; padding: 4px 10px;
+    border-radius: 999px;
+    color: rgba(226,229,240,0.9);
+    background: linear-gradient(135deg, rgba(0,184,148,0.2), rgba(79,195,247,0.1));
+    border: 1px solid rgba(85,215,184,0.28);
+    box-shadow: inset 0 1px 0 rgba(255,255,255,0.05), 0 3px 12px rgba(0,0,0,0.16);
+    font-size: 9px; font-weight: 700; white-space: nowrap;
+}}
+.meter-status strong {{
+    color: #fff; font-family: Consolas, monospace; font-size: 13px;
+    line-height: 1; font-variant-numeric: tabular-nums;
+}}
 .speed-delay-group {{
     display: flex; gap: 10px; align-items: center; flex: 0 0 auto;
 }}
@@ -582,6 +602,8 @@ body {{
     .controls button {{ width: 24px; height: 24px; }}
     .measure-status {{ min-width: 72px; height: 26px; padding: 3px 8px; }}
     .measure-status strong {{ font-size: 13px; }}
+    .meter-status {{ min-width: 62px; height: 26px; padding: 3px 8px; }}
+    .meter-status strong {{ font-size: 12px; }}
     .seek-wrap {{ flex-basis: 190px; padding: 2px 6px; }}
     .seek-wrap input[type=range] {{ min-width: 70px; }}
     .speed-wrap {{ padding: 2px 6px; gap: 5px; }}
@@ -627,6 +649,9 @@ body {{
             </div>
             <div class="measure-status" title="当前小节">
                 <span>小节</span><strong id="measureNumber">1</strong><em>/ {len(measure_boundaries)}</em>
+            </div>
+            <div class="meter-status" title="当前拍号">
+                <span>拍号</span><strong id="meterSignature">{html.escape(meter_sections[0]['signature'])}</strong>
             </div>
             <div class="seek-wrap">
                 <input type="range" id="seekSlider" min="0" max="1" step="0.001" value="0" disabled>
@@ -675,6 +700,7 @@ const SVG_SCALE = {SVG_SCALE};
 const BPM = {bpm};
 const timings = {json.dumps(timings_js)};
 const MEASURE_BOUNDARIES = {json.dumps(measure_boundaries)};
+const METER_SECTIONS = {json.dumps(meter_sections, ensure_ascii=False)};
 const VIDEO_OFFSET = {auto_offset};
 const START_DISPLAY_BEAT = {start_display_beat};
 const STRIP_WIDTH = {svg_w};
@@ -698,6 +724,7 @@ const pv = document.getElementById('pv');
 const videoEmpty = document.getElementById('videoEmpty');
 const bpmNumber = document.getElementById('bpmNumber');
 const measureNumber = document.getElementById('measureNumber');
+const meterSignature = document.getElementById('meterSignature');
 const playMarker = document.querySelector('.play-marker');
 const seekWrap = document.querySelector('.seek-wrap');
 let isPlaying = false;
@@ -709,6 +736,7 @@ let cachedPlayPositionPx = null;
 let lastScrollDistance = null;
 let lastBpm = null;
 let lastMeasureNumber = null;
+let lastMeterSignature = null;
 let lastTimeText = null;
 let lastSeekPercent = null;
 let seekRectCache = null;
@@ -766,7 +794,21 @@ function findMeasureNumber(beat) {{
     return Math.max(1, Math.min(MEASURE_BOUNDARIES.length, lo));
 }}
 
-window.__RHYTHM_ANALYSIS__ = {{ timings, MEASURE_BOUNDARIES, videoTimeToState, findMeasureNumber }};
+function findMeterSignature(beat) {{
+    let lo = 0;
+    let hi = METER_SECTIONS.length;
+    while (lo < hi) {{
+        const mid = (lo + hi) >> 1;
+        if (METER_SECTIONS[mid].start_beat <= beat + 1e-6) lo = mid + 1;
+        else hi = mid;
+    }}
+    return METER_SECTIONS[Math.max(0, lo - 1)].signature;
+}}
+
+window.__RHYTHM_ANALYSIS__ = {{
+    timings, MEASURE_BOUNDARIES, METER_SECTIONS,
+    videoTimeToState, findMeasureNumber, findMeterSignature,
+}};
 
 function formatBpm(value) {{
     return Number.isInteger(value) ? String(value) : value.toFixed(2).replace(/[.]?0+$/, '');
@@ -914,6 +956,11 @@ function renderFrame(forceUi = false) {{
     if (currentMeasure !== lastMeasureNumber) {{
         lastMeasureNumber = currentMeasure;
         measureNumber.textContent = String(currentMeasure);
+    }}
+    const currentMeter = findMeterSignature(state.beat);
+    if (currentMeter !== lastMeterSignature) {{
+        lastMeterSignature = currentMeter;
+        meterSignature.textContent = currentMeter;
     }}
     syncSeekUi(forceUi);
 }}

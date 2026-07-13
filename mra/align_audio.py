@@ -157,6 +157,15 @@ def align_song(song_dir, song_id, diff_id=5, force=False):
     offset_file = offset_file_path(song_dir, diff_id)
     offset_file.parent.mkdir(parents=True, exist_ok=True)
 
+    if offset_file.is_file() and not force:
+        try:
+            existing_offset = float(offset_file.read_text(encoding='utf-8').strip())
+        except (OSError, ValueError):
+            print(f'  [{song_id}] 已有音频偏移无效，重新对齐')
+        else:
+            print(f'  [{song_id}] 已有音频偏移 {existing_offset:+.4f}s，跳过')
+            return existing_offset
+
     if not video_path:
         print(f'  [{song_id}] 无 {preview_video_candidates(diff_id)[0]}'); return None
     if not os.path.exists(maidata):
@@ -225,7 +234,7 @@ def main():
     ap.add_argument('-diff', '--difficulty', type=int, default=None,
                     help='难度 ID；不指定则默认只处理 MASTER/Re:MASTER')
     ap.add_argument('-f', '--force', action='store_true',
-                    help='兼容参数；音频偏移现在每次都会重新计算')
+                    help='强制覆盖已有音频偏移')
     args = ap.parse_args()
 
     base_dir = os.path.abspath(args.input) if args.input else str(PROJECT_ROOT)

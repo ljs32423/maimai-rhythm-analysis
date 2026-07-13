@@ -1,4 +1,0 @@
--r requirements.txt
-
-# madmom 0.16 API/model compatible prebuilt wheel for modern Windows/Python.
-madmom-prebuilt==0.17.post1

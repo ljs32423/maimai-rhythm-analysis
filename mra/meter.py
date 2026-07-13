@@ -1,31 +1,15 @@
-"""拍号模型、简洁拍号文件读写与 BeatNet+ 纯音频分析。"""
+"""拍号时间轴、简洁拍号文件读写与人工编辑模板。"""
 from __future__ import annotations
 
-import importlib
-import importlib.metadata
 import json
-import math
-import sys
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterable, Sequence
 
-import numpy as np
-
-from .difficulty import meter_analysis_path
-from .simai_parser import Chart, time_to_beat
+from .difficulty import meter_file_path
 
 
 EPSILON = 1e-6
-GRID_STEP = 0.5
-BEATNET_PLUS_FPS = 50.0
-BEATNET_PLUS_BEATS_PER_BAR = (3, 4, 5, 7)
-BEATNET_PLUS_MIN_BPM = 55.0
-BEATNET_PLUS_MAX_BPM = 215.0
-BEATNET_PLUS_METER_CHANGE_PROB = 1e-5
-BEATNET_PLUS_WEIGHTS = "generic_weights.pt"
-BEATNET_PLUS_REVISION = "bb90eb0a9065b101a4b4c4cb2b2061950266cb4b"
-_SESSION_BEATNET_PLUS_PROFILES: dict[tuple[str, int, int], dict] = {}
 
 
 @dataclass(frozen=True)
@@ -209,278 +193,20 @@ def _expand_sections(sections: Sequence[MeterMeasure],
     return result or list(ordered)
 
 
-def beat_to_time(beat: float, timeline: Sequence[tuple[float, float]]) -> float:
-    """四分音符拍位转秒，作为 ``time_to_beat`` 的分段反函数。"""
-    if not timeline:
-        return 0.0
-    accumulated = 0.0
-    for index, (start_time, bpm) in enumerate(timeline):
-        end_time = timeline[index + 1][0] if index + 1 < len(timeline) else math.inf
-        segment_beats = (end_time - start_time) * bpm / 60.0
-        if beat <= accumulated + segment_beats + EPSILON:
-            return start_time + max(0.0, beat - accumulated) * 60.0 / max(bpm, EPSILON)
-        accumulated += segment_beats
-    return timeline[-1][0]
-
-
-def _audio_fingerprint(audio_path: Path) -> dict:
-    stat = audio_path.stat()
-    return {"size": stat.st_size, "mtime_ns": stat.st_mtime_ns}
-
-
-def _import_madmom_downbeats():
-    """导入作为解码器的 madmom；兼容 madmom-prebuilt 包名元数据。"""
-    try:
-        module = importlib.import_module("madmom")
-    except importlib.metadata.PackageNotFoundError as exc:
-        if exc.name != "madmom":
-            raise
-        original = importlib.metadata.distribution
-
-        def compatible_distribution(name: str):
-            return original("madmom-prebuilt" if name == "madmom" else name)
-
-        importlib.metadata.distribution = compatible_distribution
-        try:
-            module = importlib.import_module("madmom")
-        finally:
-            importlib.metadata.distribution = original
-    downbeats = importlib.import_module("madmom.features.downbeats")
-    beats = importlib.import_module("madmom.features.beats")
-    return module, downbeats, beats
-
-
-def _import_beatnet_plus():
-    """导入 BeatNet+；支持安装包或项目 ``.tools`` 下的固定版本。"""
-    _import_madmom_downbeats()
-    try:
-        inference = importlib.import_module("BeatNetPlus.inference")
-    except ImportError as first_error:
-        source = (Path(__file__).resolve().parents[1] / ".tools" /
-                  "BeatNet-Plus" / "src")
-        if not source.is_dir():
-            raise ImportError(
-                "未找到 BeatNet+；请运行 powershell -ExecutionPolicy Bypass "
-                "-File tools/setup_beatnet_plus.ps1"
-            ) from first_error
-        source_text = str(source)
-        if source_text not in sys.path:
-            sys.path.insert(0, source_text)
-        inference = importlib.import_module("BeatNetPlus.inference")
-    return inference
-
-
-def _beatnet_plus_weights_path() -> Path:
-    package_source = (Path(__file__).resolve().parents[1] / ".tools" /
-                      "BeatNet-Plus" / "src" / "BeatNetPlus" / "models" /
-                      BEATNET_PLUS_WEIGHTS)
-    if package_source.is_file():
-        return package_source
-    package = importlib.import_module("BeatNetPlus")
-    installed = Path(package.__file__).resolve().parent / "models" / BEATNET_PLUS_WEIGHTS
-    if installed.is_file():
-        return installed
-    raise FileNotFoundError(f"BeatNet+ 缺少模型权重 {BEATNET_PLUS_WEIGHTS}")
-
-
-def _run_beatnet_plus(audio_path: Path) -> tuple[list[dict], str]:
-    """用 BeatNet+ 产生激活，再用扩展拍号状态的 DBN 解码。"""
-    inference = _import_beatnet_plus()
-    _module, downbeats, beats_module = _import_madmom_downbeats()
-    torch = importlib.import_module("torch")
-    device = "cuda" if torch.cuda.is_available() else "cpu"
-    estimator = inference.BeatNetPlusInference(
-        str(_beatnet_plus_weights_path()), mode="online", inference_model="PF",
-        device=device,
-    )
-    audio = estimator._load_audio(str(audio_path))
-    features = estimator.proc.process_audio(audio).T
-    activations = estimator._get_activations(features)
-    if activations.ndim != 2 or activations.shape[1] < 2:
-        raise RuntimeError("BeatNet+ 未返回 beat/downbeat 二维激活值")
-
-    # BeatNet+ 输出 50 fps 的 beat/downbeat 概率。DBN 只负责时序解码，
-    # 拍号候选扩展到 3/4、4/4、5/4、7/4，不读取谱面音符。
-    beat_times = beats_module.DBNBeatTrackingProcessor(
-        min_bpm=BEATNET_PLUS_MIN_BPM,
-        max_bpm=BEATNET_PLUS_MAX_BPM,
-        transition_lambda=60,
-        fps=BEATNET_PLUS_FPS,
-    )(np.max(activations[:, :2], axis=1))
-    if len(beat_times) < 8:
-        raise RuntimeError("BeatNet+ 检测到的拍点过少")
-
-    frame_indices = np.clip(
-        np.rint(beat_times * BEATNET_PLUS_FPS).astype(int), 0, len(activations) - 1,
-    )
-    bar_activations = np.column_stack((beat_times, activations[frame_indices, 1]))
-    decoded = downbeats.DBNBarTrackingProcessor(
-        beats_per_bar=BEATNET_PLUS_BEATS_PER_BAR,
-        meter_change_prob=BEATNET_PLUS_METER_CHANGE_PROB,
-    )(bar_activations)
-    downbeat_indices = np.flatnonzero(decoded[:, 1].astype(int) == 1)
-    if len(downbeat_indices) < 2:
-        raise RuntimeError("BeatNet+ 未检测到完整小节")
-
-    bars: list[tuple[int, int]] = []
-    for left, right in zip(downbeat_indices, downbeat_indices[1:]):
-        beats_per_bar = int(right - left)
-        if beats_per_bar in BEATNET_PLUS_BEATS_PER_BAR:
-            bars.append((int(left), beats_per_bar))
-    if not bars:
-        raise RuntimeError("BeatNet+ 未得到可用拍号")
-
-    runs: list[list[tuple[int, int]]] = []
-    run_start = 0
-    for index in range(1, len(bars) + 1):
-        changed = index == len(bars) or bars[index][1] != bars[run_start][1]
-        if not changed:
-            continue
-        runs.append(bars[run_start:index])
-        run_start = index
-
-    # DBN 偶尔会在稳定段中插入一个单小节异拍。两侧拍号相同的单小节尖峰
-    # 视为解码抖动，避免 meter.json 出现无法人工理解的往返变化。
-    run_index = 1
-    while run_index + 1 < len(runs):
-        if (len(runs[run_index]) == 1
-                and runs[run_index - 1][0][1] == runs[run_index + 1][0][1]):
-            runs[run_index - 1].extend(runs[run_index])
-            runs[run_index - 1].extend(runs[run_index + 1])
-            del runs[run_index:run_index + 2]
-            continue
-        run_index += 1
-
-    sections: list[dict] = []
-    for run in runs:
-        beat_index, beats_per_bar = run[0]
-        starts = np.asarray([item[0] for item in run], dtype=int)
-        downbeat_frames = frame_indices[starts]
-        class_margin = activations[downbeat_frames, 1] - activations[downbeat_frames, 0]
-        confidence = float(np.clip(0.5 + 0.5 * np.mean(class_margin), 0.0, 1.0))
-        sections.append({
-            "time": round(float(decoded[beat_index, 0]), 6),
-            "beats_per_bar": beats_per_bar,
-            "confidence": round(confidence, 3),
-        })
-    return sections, BEATNET_PLUS_REVISION[:7]
-
-
-def _beatnet_plus_cache_path(song_dir: Path) -> Path:
-    return song_dir / "outputs" / "_shared" / "meter" / "beatnet-plus.json"
-
-
-def _beatnet_plus_profile(audio_path: Path, cache_path: Path,
-                          force: bool = False) -> tuple[dict | None, str | None]:
-    """读取或生成同一首歌跨难度共享的纯音频分析缓存。"""
-    if not audio_path.is_file():
-        return None, "缺少 track.mp3，无法使用 BeatNet+ 分析拍号"
-    fingerprint = _audio_fingerprint(audio_path)
-    session_key = (str(audio_path.resolve()), fingerprint["size"], fingerprint["mtime_ns"])
-    if session_key in _SESSION_BEATNET_PLUS_PROFILES:
-        return _SESSION_BEATNET_PLUS_PROFILES[session_key], None
-    if cache_path.is_file() and not force:
-        try:
-            cached = json.loads(cache_path.read_text(encoding="utf-8"))
-            if (cached.get("audio") == fingerprint
-                    and cached.get("backend") == "beatnet-plus"
-                    and cached.get("weights") == BEATNET_PLUS_WEIGHTS):
-                _SESSION_BEATNET_PLUS_PROFILES[session_key] = cached
-                return cached, None
-        except (OSError, ValueError, TypeError):
-            pass
-    try:
-        sections, package_version = _run_beatnet_plus(audio_path)
-    except ImportError:
-        return None, ("未安装 BeatNet+；请运行 powershell -ExecutionPolicy Bypass "
-                      "-File tools/setup_beatnet_plus.ps1")
-    except Exception as exc:
-        return None, f"BeatNet+ 纯音频拍号分析失败: {type(exc).__name__}: {exc}"
-    cached = {
-        "version": 1,
-        "backend": "beatnet-plus",
-        "package_version": package_version,
-        "weights": BEATNET_PLUS_WEIGHTS,
-        "fps": BEATNET_PLUS_FPS,
-        "beats_per_bar": list(BEATNET_PLUS_BEATS_PER_BAR),
-        "confidence": "BeatNet+ downbeat-vs-beat class margin; not calibrated",
-        "audio": fingerprint,
-        "sections": sections,
-    }
-    cache_path.parent.mkdir(parents=True, exist_ok=True)
-    cache_path.write_text(
-        json.dumps(cached, ensure_ascii=False, indent=2) + "\n", encoding="utf-8",
-    )
-    _SESSION_BEATNET_PLUS_PROFILES[session_key] = cached
-    return cached, None
-
-
-def _profile_to_meter_map(profile: dict, chart: Chart, total_beats: float,
-                          first_offset: float) -> MeterMap:
-    sections: list[MeterMeasure] = []
-    for index, item in enumerate(profile.get("sections", [])):
-        audio_time = float(item["time"])
-        chart_time = max(0.0, audio_time - first_offset)
-        start_beat = round(time_to_beat(chart_time, chart.bpm_timeline) / GRID_STEP) * GRID_STEP
-        if index == 0:
-            # 文件从曲首即可读；首个检测下拍只用于确定拍号，不制造前置空段。
-            start_beat = 0.0
-        if start_beat > total_beats + EPSILON:
-            continue
-        signature = TimeSignature(int(item["beats_per_bar"]), 4)
-        measure = MeterMeasure(
-            start_beat,
-            signature,
-            float(item.get("confidence", 0.5)),
-            str(profile.get("backend", "beatnet-plus")),
-        )
-        if sections and sections[-1].signature == measure.signature:
-            continue
-        sections.append(measure)
-    if not sections:
-        return MeterMap(default="4/4")
-    return MeterMap(_expand_sections(sections, total_beats), sections[0].signature)
-
-
-def _manual_config(song_dir: Path, difficulty: int) -> dict | None:
-    path = song_dir / "meter.json"
-    if not path.is_file():
-        return None
-    data = json.loads(path.read_text(encoding="utf-8"))
-    difficulties = data.get("difficulties")
-    if isinstance(difficulties, dict):
-        selected = difficulties.get(str(difficulty))
-        if selected is None:
-            return None
-        merged = {key: value for key, value in data.items() if key != "difficulties"}
-        merged.update(selected)
-        return merged
-    return data
-
-
-def analyze_chart_meter(song_dir: str | Path, difficulty: int, chart: Chart,
-                        total_beats: float, first_offset: float = 0.0,
-                        force: bool = False) -> MeterMap:
-    """读取人工配置或执行 BeatNet+ 纯音频分析并写出简洁变化点。"""
+def ensure_meter_file(song_dir: str | Path, difficulty: int,
+                      total_beats: float | None = None) -> MeterMap:
+    """确保拍号文件存在；缺失时只写入默认 4/4，不进行任何检测。"""
     song_root = Path(song_dir)
-    output = meter_analysis_path(song_root, difficulty)
-    manual = _manual_config(song_root, difficulty)
-    warnings: list[str] = []
-    if manual is not None:
-        meter_map = MeterMap.from_dict(manual, total_beats)
-    elif output.is_file() and not force:
+    output = meter_file_path(song_root, difficulty)
+    if output.is_file():
         return MeterMap.from_dict(json.loads(output.read_text(encoding="utf-8")), total_beats)
-    else:
-        profile, warning = _beatnet_plus_profile(
-            song_root / "track.mp3", _beatnet_plus_cache_path(song_root), force=force,
-        )
-        if warning:
-            warnings.append(warning)
-        meter_map = (_profile_to_meter_map(profile, chart, total_beats, first_offset)
-                     if profile is not None else MeterMap(default="4/4"))
+
+    meter_map = MeterMap([
+        MeterMeasure(0.0, TimeSignature(4, 4), 1.0, "template"),
+    ], default="4/4")
     output.parent.mkdir(parents=True, exist_ok=True)
     output.write_text(
-        json.dumps(meter_map.to_dict(difficulty, warnings), ensure_ascii=False, indent=2) + "\n",
+        json.dumps(meter_map.to_dict(difficulty), ensure_ascii=False, indent=2) + "\n",
         encoding="utf-8",
     )
     return meter_map
@@ -490,10 +216,7 @@ def load_meter_map(song_dir: str | Path, difficulty: int,
                    total_beats: float | None = None) -> MeterMap:
     """渲染端读取变化点并在内存展开；没有结果时保持 4/4。"""
     song_root = Path(song_dir)
-    manual = _manual_config(song_root, difficulty)
-    if manual is not None:
-        return MeterMap.from_dict(manual, total_beats)
-    output = meter_analysis_path(song_root, difficulty)
+    output = meter_file_path(song_root, difficulty)
     if output.is_file():
         return MeterMap.from_dict(json.loads(output.read_text(encoding="utf-8")), total_beats)
     return MeterMap(default="4/4")

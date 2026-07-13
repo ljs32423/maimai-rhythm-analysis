@@ -521,6 +521,21 @@ class WorkflowTests(unittest.TestCase):
             self.assertAlmostEqual(offset, 6.5)
             self.assertEqual(offset_file_path(root, 5).read_text(encoding="utf-8").strip(), "6.5000")
 
+    def test_audio_alignment_reuses_existing_offset_without_processing_media(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            output = offset_file_path(root, 5)
+            output.parent.mkdir(parents=True)
+            original = "1.2500\n"
+            output.write_text(original, encoding="utf-8")
+
+            with mock.patch.object(align_audio, "extract_audio_mono") as extract:
+                offset = align_audio.align_song(str(root), "test", diff_id=5, force=False)
+
+            self.assertEqual(offset, 1.25)
+            self.assertEqual(output.read_text(encoding="utf-8"), original)
+            extract.assert_not_called()
+
     def test_variable_bpm_marker_is_rendered(self):
         chart = Chart(
             level=12,
@@ -707,12 +722,17 @@ class WorkflowTests(unittest.TestCase):
             self.assertIn('class="bpm-readout"', html)
             self.assertIn('class="measure-status"', html)
             self.assertIn('id="measureNumber">1</strong>', html)
+            self.assertIn('class="meter-status"', html)
+            self.assertIn('id="meterSignature">4/4</strong>', html)
             self.assertIn('const MEASURE_BOUNDARIES = ', html)
+            self.assertIn('const METER_SECTIONS = ', html)
             self.assertIn('function findMeasureNumber(beat)', html)
+            self.assertIn('function findMeterSignature(beat)', html)
             self.assertIn('measureNumber.textContent = String(currentMeasure);', html)
+            self.assertIn('meterSignature.textContent = currentMeter;', html)
             self.assertNotIn('outer-hexagon', html)
             self.assertIn('class="left-pentagon"', html)
-            self.assertNotIn('<span>拍号</span>', html)
+            self.assertNotIn('<div class="detail-item"><span>拍号</span>', html)
 
     def test_html_fine_tune_delay_control_present(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -988,7 +1008,7 @@ class WorkflowTests(unittest.TestCase):
         self.assertEqual(run_step.call_args_list[2].args[2], ['-d', 'song', '-diff', '5'])
         self.assertEqual(run_step.call_args_list[4].args[2], ['-d', 'song', '-diff', '5', '-offset', '0.0'])
 
-    def test_run_all_force_rebuilds_everything_except_existing_video(self):
+    def test_run_all_force_preserves_meter_video_and_audio_alignment(self):
         selected = [SongFolder(Path("song"), "song", "song")]
         with mock.patch.object(sys, "argv", ["run_all.py", "-f"]), \
              mock.patch.object(run_all, "discover_song_folders", return_value=selected), \
@@ -999,7 +1019,7 @@ class WorkflowTests(unittest.TestCase):
         self.assertEqual(result, 0)
         self.assertEqual(
             [call.args[3] for call in run_step.call_args_list],
-            [True, True, False, True, True],
+            [False, True, False, False, True],
         )
 
     def test_run_all_returns_failure_when_a_step_fails(self):

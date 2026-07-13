@@ -34,7 +34,7 @@ from .difficulty import (DIFFICULTY_NAMES, default_target_difficulties,
                          difficulty_file_stem, legacy_difficulty_path,
                          rhythm_png_path, rhythm_svg_path, strip_segment_base_path,
                          strip_svg_path)
-from .meter import MeterMap, analyze_chart_meter
+from .meter import MeterMap, ensure_meter_file
 from .song_library import PROJECT_ROOT, find_song_dirs
 
 # ============ 全局样式 ============
@@ -980,11 +980,9 @@ def process_song(song_dir, song_id, force=False, difficulties=None):
         migrate_legacy_visual_outputs(song_dir, did, force=force)
         segment_base = strip_segment_base_path(song_dir, did)
         events = compute_rhythm_events(ch)
-        # 先分析拍号，再让所有输出共用同一份小节时间轴。尾部长度也按末尾拍号计算。
+        # 先读取或初始化拍号文件，让所有输出共用同一份人工小节时间轴。
         last_note_beat = time_to_beat(max(n.time_sec for n in ch.notes), ch.bpm_timeline)
-        meter_map = analyze_chart_meter(
-            song_dir, did, ch, last_note_beat, song.first_offset, force=False,
-        )
+        meter_map = ensure_meter_file(song_dir, did, last_note_beat)
         folded_total_beats = meter_map.add_measures(last_note_beat, 1)
         long_total_beats = meter_map.add_measures(
             folded_total_beats, LONG_IMAGE_EXTRA_MEASURES,
