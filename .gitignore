@@ -5,7 +5,8 @@ __pycache__/
 .cph/
 .tools/
 tools/**/obj/
-songs/
+songs/*
+!songs/.gitkeep
 songs/**/.majdata-record-*/
 songs/**/outputs/
 release/
