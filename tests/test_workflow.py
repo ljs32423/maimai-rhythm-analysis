@@ -705,10 +705,14 @@ class WorkflowTests(unittest.TestCase):
             self.assertIn('display: none;', html)
             self.assertIn('background: none;', html)
             self.assertIn('class="bpm-readout"', html)
-            self.assertNotIn('measure-number', html)
+            self.assertIn('class="measure-status"', html)
+            self.assertIn('id="measureNumber">1</strong>', html)
+            self.assertIn('const MEASURE_BOUNDARIES = ', html)
+            self.assertIn('function findMeasureNumber(beat)', html)
+            self.assertIn('measureNumber.textContent = String(currentMeasure);', html)
             self.assertNotIn('outer-hexagon', html)
             self.assertIn('class="left-pentagon"', html)
-            self.assertNotIn('>4/4<', html)
+            self.assertNotIn('<span>拍号</span>', html)
 
     def test_html_fine_tune_delay_control_present(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -979,17 +983,31 @@ class WorkflowTests(unittest.TestCase):
             result = run_all.main()
         self.assertEqual(result, 0)
         self.assertTrue(all(call.args[3] is False for call in run_step.call_args_list))
-        self.assertEqual(len(run_step.call_args_list), 4)
+        self.assertEqual(len(run_step.call_args_list), 5)
         self.assertEqual(run_step.call_args_list[1].args[2], ['-d', 'song', '-diff', '5'])
         self.assertEqual(run_step.call_args_list[2].args[2], ['-d', 'song', '-diff', '5'])
-        self.assertEqual(run_step.call_args_list[3].args[2], ['-d', 'song', '-diff', '5', '-offset', '0.0'])
+        self.assertEqual(run_step.call_args_list[4].args[2], ['-d', 'song', '-diff', '5', '-offset', '0.0'])
+
+    def test_run_all_force_rebuilds_everything_except_existing_video(self):
+        selected = [SongFolder(Path("song"), "song", "song")]
+        with mock.patch.object(sys, "argv", ["run_all.py", "-f"]), \
+             mock.patch.object(run_all, "discover_song_folders", return_value=selected), \
+             mock.patch.object(run_all, "target_difficulties_for_song", return_value=[5]), \
+             mock.patch.object(run_all, "run_step", return_value=True) as run_step:
+            result = run_all.main()
+
+        self.assertEqual(result, 0)
+        self.assertEqual(
+            [call.args[3] for call in run_step.call_args_list],
+            [True, True, False, True, True],
+        )
 
     def test_run_all_returns_failure_when_a_step_fails(self):
         selected = [SongFolder(Path("song"), "song", "song")]
         with mock.patch.object(sys, "argv", ["run_all.py"]), \
              mock.patch.object(run_all, "discover_song_folders", return_value=selected), \
              mock.patch.object(run_all, "target_difficulties_for_song", return_value=[5]), \
-             mock.patch.object(run_all, "run_step", side_effect=[True, False, True, True]):
+             mock.patch.object(run_all, "run_step", side_effect=[True, False, True, True, True]):
             result = run_all.main()
         self.assertEqual(result, 1)
 
@@ -1006,7 +1024,7 @@ class WorkflowTests(unittest.TestCase):
         self.assertEqual(calls[1].args[2], ['-d', 'Xaleid◆scopiX', '-diff', '6'])
         self.assertEqual(calls[2].args[2], ['-d', 'Xaleid◆scopiX', '-diff', '6'])
         self.assertEqual(
-            calls[3].args[2],
+            calls[4].args[2],
             ['-d', 'Xaleid◆scopiX', '-diff', '6', '-offset', '0.0'],
         )
 
@@ -1024,7 +1042,7 @@ class WorkflowTests(unittest.TestCase):
         with mock.patch.object(sys, "argv", ["run_all.py"]), \
              mock.patch.object(run_all, "discover_song_folders", return_value=selected), \
              mock.patch.object(run_all, "target_difficulties_for_song", return_value=[5]), \
-             mock.patch.object(run_all, "run_step", side_effect=[True, True, True, True]), \
+             mock.patch.object(run_all, "run_step", side_effect=[True, True, True, True, True]), \
              mock.patch.object(run_all, "timestamp_now", return_value="12:34:56"), \
              mock.patch("builtins.print") as fake_print:
             result = run_all.main()
@@ -1040,7 +1058,7 @@ class WorkflowTests(unittest.TestCase):
         with mock.patch.object(sys, "argv", ["run_all.py"]), \
              mock.patch.object(run_all, "discover_song_folders", return_value=selected), \
              mock.patch.object(run_all, "target_difficulties_for_song", return_value=[5]), \
-             mock.patch.object(run_all, "run_step", side_effect=[True, False, True, True]), \
+             mock.patch.object(run_all, "run_step", side_effect=[True, False, True, True, True]), \
              mock.patch("builtins.print") as fake_print:
             result = run_all.main()
 

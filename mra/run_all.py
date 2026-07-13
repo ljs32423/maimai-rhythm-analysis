@@ -2,18 +2,19 @@
 """
 maimai 节奏解析 一键生成
 ========================
-按顺序自动执行四个步骤:
-  1. visualize      — 生成节奏解析图片 (SVG + PNG)
-  2. render_preview — 从 maidata.txt 生成缺失的谱面预览视频 (MajdataView)
-  3. align_audio    — 自动对齐视频音轨与谱面 (首个 tap 检测)
-  4. make_html      — 生成网页版 (谱面预览视频 + 滚动节奏条)
+按顺序自动执行五个步骤:
+  1. analyze_meter  — 用 BeatNet+ 纯音频分析拍号变化
+  2. visualize      — 用拍号时间轴生成节奏解析图片 (SVG + PNG)
+  3. render_preview — 从 maidata.txt 生成缺失的谱面预览视频 (MajdataView)
+  4. align_audio    — 自动对齐视频音轨与谱面 (首个 tap 检测)
+  5. make_html      — 生成网页版 (谱面预览视频 + 滚动节奏条)
 
 各步骤相互独立，某步失败不会阻断后续步骤。
 用法:
   python run_all.py                            # 批量所有歌曲 (默认 MASTER/Re:MASTER)
   python run_all.py -d "WiPE OUT MEMORIES"     # 单曲
   python run_all.py -diff 4                    # 指定难度
-  python run_all.py -f                         # 强制重新生成
+  python run_all.py -f                         # 强制重建除已有视频外的全部产物
 """
 import os, sys, argparse, subprocess
 from datetime import datetime
@@ -66,7 +67,10 @@ def main():
     ap.add_argument('-d', '--dir', default=None, help='只处理指定曲目名')
     ap.add_argument('-diff', '--difficulty', type=int, default=None,
                     help='难度 ID；不指定则默认只处理 MASTER/Re:MASTER')
-    ap.add_argument('-f', '--force', action='store_true', help='强制重新生成')
+    ap.add_argument(
+        '-f', '--force', action='store_true',
+        help='强制重建除已有谱面预览视频外的全部产物',
+    )
     ap.add_argument('-offset', '--offset', type=float, default=0.0, help='初始延迟 (秒)')
     args = ap.parse_args()
 
@@ -79,12 +83,14 @@ def main():
 
     common = ['-i', args.input] if args.input else []
 
-    # 四个步骤: (名称, 脚本路径, 是否接受 -f, 是否附加 offset)
+    # 五个步骤: (名称, 脚本路径, 是否传递 -f, 是否附加 offset)
+    # 视频录制成本最高：即使 run_all 使用 -f，也只在视频缺失时生成。
     steps = [
-        ('1/4 节奏解析图片', 'mra.visualize', True, False),
-        ('2/4 谱面预览视频', 'mra.render_preview', True, False),
-        ('3/4 音频自动对齐', 'mra.align_audio', True, False),
-        ('4/4 网页版预览', 'mra.make_html', True, True),
+        ('1/5 拍号分析', 'mra.analyze_meter', True, False),
+        ('2/5 节奏解析图片', 'mra.visualize', True, False),
+        ('3/5 谱面预览视频', 'mra.render_preview', False, False),
+        ('4/5 音频自动对齐', 'mra.align_audio', True, False),
+        ('5/5 网页版预览', 'mra.make_html', True, True),
     ]
 
     ok_all = True

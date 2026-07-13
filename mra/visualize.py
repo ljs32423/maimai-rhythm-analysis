@@ -34,6 +34,7 @@ from .difficulty import (DIFFICULTY_NAMES, default_target_difficulties,
                          difficulty_file_stem, legacy_difficulty_path,
                          rhythm_png_path, rhythm_svg_path, strip_segment_base_path,
                          strip_svg_path)
+from .meter import MeterMap, analyze_chart_meter
 from .song_library import PROJECT_ROOT, find_song_dirs
 
 # ============ 全局样式 ============
@@ -427,7 +428,7 @@ ROW_H = NOTE_AREA_H + LABEL_AREA_H + ROW_GAP  # 单行总高度
 NOTE_CY = NOTE_AREA_H / 2                     # 音符区中心 Y
 LABEL_CY = NOTE_AREA_H + LABEL_GAP + LABEL_AREA_H / 2  # 标注区中心 Y
 ROW_BEATS_DEFAULT = 32    # 默认每行拍数 (8小节=32拍，便于折叠查看)
-BEATS_PER_MEASURE = 4     # 每小节拍数 (4/4拍)
+BEATS_PER_MEASURE = 4     # 兼容常量；实际小节长度由 MeterMap 决定
 LONG_IMAGE_EXTRA_MEASURES = 12  # 长条图额外留白的小节数
 
 # 音符合并优先级 (多押时取最重要的作为代表)
@@ -485,12 +486,12 @@ def _event_ring_style(notes):
 # ============ 原语构造 (SVG 与 matplotlib 共用) ============
 # 原语: (kind, *args)
 
-def build_primitives(events, row_beats, total_beats, bpm, chart):
+def build_primitives(events, row_beats, total_beats, bpm, chart, meter_map=None):
     """生成原语列表. 每行 row_beats 拍, 自动折叠. 多押合并为单个圆点.
     左右各留 PAD_X 留白, 避免边缘音符被截断."""
     n_rows = max(1, int(math.ceil(total_beats / row_beats)))
     prims = []
-    measure_beats = 4
+    meter_map = meter_map or MeterMap(default="4/4")
     W_row = row_width_px(row_beats)
     right_edge = PAD_X + row_beats * PX_PER_BEAT  # 网格右边界
     label_sizes = _fit_label_font_sizes(events)
@@ -505,34 +506,47 @@ def build_primitives(events, row_beats, total_beats, bpm, chart):
         prims.append(('rect', 0, y0 + NOTE_AREA_H + LABEL_GAP, W_row, LABEL_AREA_H, '#ffffff', 1.0))
         # 左侧预留区也补齐网格，让前端初始状态显示完整“无键带”而不是空黑底。
         left_grid_beats = int(math.ceil(PAD_X / PX_PER_BEAT))
-        for k in range(-left_grid_beats, 0):
-            x = beat_to_x_in_row(k)
-            if x < 0:
+        grid_start = b0 - left_grid_beats
+        grid_end = min(total_beats, b0 + row_beats)
+        boundaries = meter_map.boundaries(grid_start, b0 + row_beats)
+        boundary_keys = {round(boundary, 6) for boundary in boundaries}
+        integer_beats = list(range(math.ceil(grid_start), math.floor(grid_end) + 1))
+        grid_beats = sorted(set(float(beat) for beat in integer_beats) | set(boundaries))
+        for absolute_beat in grid_beats:
+            beat_in_row = absolute_beat - b0
+            x = beat_to_x_in_row(beat_in_row)
+            if not 0 <= x <= right_edge + 1e-6:
                 continue
-            if (b0 + k) % measure_beats == 0:
-                prims.append(('line', x, y0 + 1, x, y0 + NOTE_AREA_H - 1, '#ffffff', 2.0))
-            else:
+            is_measure = round(absolute_beat, 6) in boundary_keys
+            if is_measure:
+                prims.append(('line', x, y0 + 1, x, y0 + NOTE_AREA_H - 1,
+                              '#ffffff', 2.0))
+            elif abs(absolute_beat - round(absolute_beat)) < 1e-6:
                 prims.append(('line', x, y0 + 3, x, y0 + 15, '#ffffff', 0.85))
-                prims.append(('line', x, y0 + NOTE_AREA_H - 15, x, y0 + NOTE_AREA_H - 3, '#ffffff', 0.85))
+                prims.append(('line', x, y0 + NOTE_AREA_H - 15,
+                              x, y0 + NOTE_AREA_H - 3, '#ffffff', 0.85))
+
+        # 每个四分音符拍内的四等分点；若该位置本身是变拍号小节线则不画点。
+        for absolute_beat in range(math.ceil(grid_start), math.floor(grid_end) + 1):
             for sub in (0.25, 0.5, 0.75):
-                sx = x + sub * PX_PER_BEAT
-                if 0 <= sx < PAD_X:
+                sub_beat = absolute_beat + sub
+                sx = beat_to_x_in_row(sub_beat - b0)
+                if (sub_beat <= grid_end + 1e-6 and 0 <= sx < right_edge and
+                        round(sub_beat, 6) not in boundary_keys):
                     prims.append(('dot', sx, y0 + NOTE_CY, 0.8, '#666666'))
-        # 网格 (偏移 PAD_X)
-        for k in range(row_beats + 1):
-            ab = b0 + k
-            if ab > total_beats:
-                break
-            x = beat_to_x_in_row(k)
-            if ab % measure_beats == 0:
-                prims.append(('line', x, y0 + 1, x, y0 + NOTE_AREA_H - 1, '#ffffff', 2.0))
-            else:
-                prims.append(('line', x, y0 + 3, x, y0 + 15, '#ffffff', 0.85))
-                prims.append(('line', x, y0 + NOTE_AREA_H - 15, x, y0 + NOTE_AREA_H - 3, '#ffffff', 0.85))
-            for sub in (0.25, 0.5, 0.75):
-                sx = x + sub * PX_PER_BEAT
-                if (ab + sub) <= total_beats and sx < right_edge:
-                    prims.append(('dot', sx, y0 + NOTE_CY, 0.8, '#666666'))
+
+        # 只在开头和拍号变化处标注，避免每小节重复文字。
+        visible_measures = [measure for measure in meter_map.measures
+                            if grid_start - 1e-6 <= measure.start_beat <= grid_end + 1e-6]
+        for measure in visible_measures:
+            index = meter_map.measures.index(measure)
+            changed = (index == 0 or
+                       meter_map.measures[index - 1].signature != measure.signature)
+            if changed:
+                x = beat_to_x_in_row(measure.start_beat - b0)
+                if 0 <= x <= right_edge:
+                    prims.append(('text', x + 3, y0 + 7, measure.signature.label,
+                                  '#8bd5ff', 5.2, 'bold', 'normal', 'start'))
         # 行分隔线
         if row < n_rows - 1:
             prims.append(('line', 0, y0 + ROW_H - ROW_GAP / 2,
@@ -657,10 +671,10 @@ def _fit_label_font_sizes(events):
 # ============ SVG 渲染 (长条, 可滚动) ============
 
 def render_strip_svg(events, total_beats, bpm, chart, out_path, title,
-                     row_beats=None, compact=False):
+                     row_beats=None, compact=False, meter_map=None):
     if row_beats is None:
         row_beats = int(math.ceil(total_beats))  # 不折叠, 单条超长
-    prims, n_rows = build_primitives(events, row_beats, total_beats, bpm, chart)
+    prims, n_rows = build_primitives(events, row_beats, total_beats, bpm, chart, meter_map)
     W = row_width_px(row_beats)
     if compact:
         # 紧凑模式: 音符区 + 标注区 (无标题/行间距), 用于网页滚动
@@ -732,7 +746,7 @@ def migrate_legacy_visual_outputs(song_dir, difficulty_id, force=False):
 
 
 def render_strip_svg_segments(events, total_beats, bpm, chart, base_path,
-                              segment_beats=SEGMENT_BEATS):
+                              segment_beats=SEGMENT_BEATS, meter_map=None):
     """Render compact long-strip SVG segments for frontend virtualization.
 
     The full compact strip SVG is still generated as a fallback/debug artifact.
@@ -740,7 +754,7 @@ def render_strip_svg_segments(events, total_beats, bpm, chart, base_path,
     position it at its natural x offset without losing vector clarity.
     """
     row_beats = int(math.ceil(total_beats))
-    prims, _ = build_primitives(events, row_beats, total_beats, bpm, chart)
+    prims, _ = build_primitives(events, row_beats, total_beats, bpm, chart, meter_map)
     full_width = row_width_px(row_beats)
     height = NOTE_AREA_H + LABEL_GAP + LABEL_AREA_H
     content_start = PAD_X
@@ -865,8 +879,8 @@ def _prim_to_svg(p, yoff):
 # ============ matplotlib 折叠 PNG 渲染 ============
 
 def render_strip_png(events, total_beats, bpm, chart, out_path, title,
-                     row_beats=ROW_BEATS_DEFAULT, dpi=150):
-    prims, n_rows = build_primitives(events, row_beats, total_beats, bpm, chart)
+                     row_beats=ROW_BEATS_DEFAULT, dpi=150, meter_map=None):
+    prims, n_rows = build_primitives(events, row_beats, total_beats, bpm, chart, meter_map)
     W = row_width_px(row_beats)
     H = n_rows * ROW_H + 26
     fig_w = W / 100.0
@@ -966,11 +980,15 @@ def process_song(song_dir, song_id, force=False, difficulties=None):
         migrate_legacy_visual_outputs(song_dir, did, force=force)
         segment_base = strip_segment_base_path(song_dir, did)
         events = compute_rhythm_events(ch)
-        # 计算拍数范围
-        folded_total_beats = int(time_to_beat(max(n.time_sec for n in ch.notes),
-                                              ch.bpm_timeline)) + BEATS_PER_MEASURE
-        long_total_beats = (folded_total_beats +
-                            LONG_IMAGE_EXTRA_MEASURES * BEATS_PER_MEASURE)
+        # 先分析拍号，再让所有输出共用同一份小节时间轴。尾部长度也按末尾拍号计算。
+        last_note_beat = time_to_beat(max(n.time_sec for n in ch.notes), ch.bpm_timeline)
+        meter_map = analyze_chart_meter(
+            song_dir, did, ch, last_note_beat, song.first_offset, force=False,
+        )
+        folded_total_beats = meter_map.add_measures(last_note_beat, 1)
+        long_total_beats = meter_map.add_measures(
+            folded_total_beats, LONG_IMAGE_EXTRA_MEASURES,
+        )
         # BPM 摘要文本
         chart_bpms = sorted({value for _, value in ch.bpm_timeline})
         bpm_summary = (f'BPM {chart_bpms[0]:g}' if len(chart_bpms) == 1 else
@@ -983,7 +1001,7 @@ def process_song(song_dir, song_id, force=False, difficulties=None):
         if force or not os.path.exists(rhythm_svg):
             try:
                 render_strip_svg(events, long_total_beats, song.bpm, ch,
-                                 str(rhythm_svg), title)
+                                 str(rhythm_svg), title, meter_map=meter_map)
             except Exception as e:
                 print(f'    SVG warn: {e}')
                 stats['errors'].append(f'{did} rhythm SVG: {e}')
@@ -993,7 +1011,7 @@ def process_song(song_dir, song_id, force=False, difficulties=None):
         if force or not os.path.exists(strip_svg):
             try:
                 render_strip_svg(events, long_total_beats, song.bpm, ch,
-                                 str(strip_svg), title, compact=True)
+                                 str(strip_svg), title, compact=True, meter_map=meter_map)
             except Exception as e:
                 print(f'    compact SVG warn: {e}')
                 stats['errors'].append(f'{did} strip SVG: {e}')
@@ -1002,7 +1020,8 @@ def process_song(song_dir, song_id, force=False, difficulties=None):
         expected_segments = strip_segment_paths(str(segment_base), long_total_beats)
         if force or any(not os.path.exists(path) for path in expected_segments):
             try:
-                render_strip_svg_segments(events, long_total_beats, song.bpm, ch, str(segment_base))
+                render_strip_svg_segments(events, long_total_beats, song.bpm, ch,
+                                          str(segment_base), meter_map=meter_map)
             except Exception as e:
                 print(f'    compact SVG segment warn: {e}')
                 stats['errors'].append(f'{did} strip SVG segments: {e}')
@@ -1012,7 +1031,7 @@ def process_song(song_dir, song_id, force=False, difficulties=None):
         if force or not os.path.exists(rhythm_png):
             try:
                 render_strip_png(events, folded_total_beats, song.bpm, ch,
-                                 str(rhythm_png), title)
+                                 str(rhythm_png), title, meter_map=meter_map)
             except Exception as e:
                 print(f'    PNG warn: {e}')
                 stats['errors'].append(f'{did} rhythm PNG: {e}')

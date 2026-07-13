@@ -63,6 +63,11 @@ def offset_file_path(song_dir: str | Path, difficulty_id: int) -> Path:
     return difficulty_output_path(song_dir, difficulty_id, "sync", "offset.txt")
 
 
+def meter_analysis_path(song_dir: str | Path, difficulty_id: int) -> Path:
+    """返回自动/人工拍号分析结果路径。"""
+    return difficulty_output_path(song_dir, difficulty_id, "meter", "meter.json")
+
+
 def rhythm_svg_path(song_dir: str | Path, difficulty_id: int) -> Path:
     return difficulty_output_path(song_dir, difficulty_id, "rhythm", "rhythm.svg")
 

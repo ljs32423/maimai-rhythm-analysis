@@ -18,6 +18,7 @@ from pathlib import Path
 from urllib.parse import quote
 
 from .simai_parser import parse_maidata, time_to_beat
+from .meter import load_meter_map
 from .visualize import (compute_rhythm_events, PX_PER_BEAT, PAD_X,
                         NOTE_AREA_H, LABEL_GAP, LABEL_AREA_H, NOTE_CY, NOTE_R,
                         NOTE_OUTER_DIAMETER, SEGMENT_BEATS)
@@ -102,12 +103,20 @@ def generate_html(song_dir, song_id, diff_id=5, offset=0.0):
                  else f'{bpm_min:g} – {bpm_max:g}')
     chart_duration = max((note.time_sec + note.duration_sec for note in ch.notes), default=0.0)
     duration_text = f'{int(chart_duration // 60)}:{int(chart_duration % 60):02d}'
+    total_beats = time_to_beat(chart_duration, ch.bpm_timeline)
+    meter_map = load_meter_map(song_root, diff_id, total_beats)
+    measure_boundaries = meter_map.boundaries(0.0, total_beats)
+    if not measure_boundaries:
+        measure_boundaries = [0.0]
 
     # timing 数据
     timings_js = build_timing_segments(ch)
     if not timings_js:
         timings_js.append({'beat': 0, 'bpm': bpm, 'time': 0})
-    start_display_beat = math.floor(timings_js[0]['beat'] / 4) * 4
+    start_candidates = meter_map.boundaries(-16.0, timings_js[0]['beat'])
+    start_display_beat = start_candidates[-1] if start_candidates else 0.0
+    if float(start_display_beat).is_integer():
+        start_display_beat = int(start_display_beat)
 
     mime_types = {'.mp4': 'video/mp4', '.webm': 'video/webm', '.mkv': 'video/x-matroska'}
     video_sources = '\n'.join(
@@ -362,6 +371,24 @@ body {{
 .control-buttons {{
     display: flex; gap: 4px; align-items: center; flex: 0 0 auto;
 }}
+.measure-status {{
+    display: flex; align-items: baseline; gap: 4px; flex: 0 0 auto;
+    min-width: 82px; height: 28px; padding: 4px 10px;
+    border-radius: 999px;
+    color: rgba(226,229,240,0.9);
+    background: linear-gradient(135deg, rgba(108,92,231,0.22), rgba(79,195,247,0.12));
+    border: 1px solid rgba(145,132,255,0.32);
+    box-shadow: inset 0 1px 0 rgba(255,255,255,0.05), 0 3px 12px rgba(0,0,0,0.16);
+    font-size: 9px; font-weight: 700; white-space: nowrap;
+}}
+.measure-status strong {{
+    color: #fff; font-family: Consolas, monospace; font-size: 14px;
+    line-height: 1; font-variant-numeric: tabular-nums;
+}}
+.measure-status em {{
+    color: rgba(191,195,211,0.68); font-family: Consolas, monospace;
+    font-size: 9px; font-style: normal; font-variant-numeric: tabular-nums;
+}}
 .speed-delay-group {{
     display: flex; gap: 10px; align-items: center; flex: 0 0 auto;
 }}
@@ -529,6 +556,15 @@ body {{
     font-variant-numeric: tabular-nums;
     white-space: nowrap;
 }}
+@media (max-width: 1400px) {{
+    .speed-delay-group {{ width: 100%; flex: 1 1 100%; gap: 6px; }}
+    .speed-wrap,
+    .delay-wrap {{ min-width: 0; flex: 1 1 0; padding-left: 6px; padding-right: 6px; }}
+    .speed-wrap input[type=range],
+    .delay-wrap input[type=range] {{ width: 36px; min-width: 36px; flex: 1 1 36px; }}
+    .speed-val {{ width: 50px; }}
+    .delay-val {{ width: 48px; }}
+}}
 @media (max-width: 700px), (max-height: 620px) {{
     :root {{ --play-position: 20%; }}
     .info-pane {{ padding: 18px; }}
@@ -544,6 +580,8 @@ body {{
     .controls {{ gap: 5px; padding: 7px 8px; }}
     .control-buttons {{ gap: 4px; }}
     .controls button {{ width: 24px; height: 24px; }}
+    .measure-status {{ min-width: 72px; height: 26px; padding: 3px 8px; }}
+    .measure-status strong {{ font-size: 13px; }}
     .seek-wrap {{ flex-basis: 190px; padding: 2px 6px; }}
     .seek-wrap input[type=range] {{ min-width: 70px; }}
     .speed-wrap {{ padding: 2px 6px; gap: 5px; }}
@@ -586,6 +624,9 @@ body {{
             <div class="control-buttons">
                 <button id="btnPlay" title="播放" aria-label="播放" disabled>&#9654;</button>
                 <button id="btnRewind" title="回到开头" aria-label="回到开头" disabled>&#8634;</button>
+            </div>
+            <div class="measure-status" title="当前小节">
+                <span>小节</span><strong id="measureNumber">1</strong><em>/ {len(measure_boundaries)}</em>
             </div>
             <div class="seek-wrap">
                 <input type="range" id="seekSlider" min="0" max="1" step="0.001" value="0" disabled>
@@ -633,6 +674,7 @@ const PAD_X = {PAD_X};
 const SVG_SCALE = {SVG_SCALE};
 const BPM = {bpm};
 const timings = {json.dumps(timings_js)};
+const MEASURE_BOUNDARIES = {json.dumps(measure_boundaries)};
 const VIDEO_OFFSET = {auto_offset};
 const START_DISPLAY_BEAT = {start_display_beat};
 const STRIP_WIDTH = {svg_w};
@@ -655,6 +697,7 @@ const delayInput = document.getElementById('delayInput');
 const pv = document.getElementById('pv');
 const videoEmpty = document.getElementById('videoEmpty');
 const bpmNumber = document.getElementById('bpmNumber');
+const measureNumber = document.getElementById('measureNumber');
 const playMarker = document.querySelector('.play-marker');
 const seekWrap = document.querySelector('.seek-wrap');
 let isPlaying = false;
@@ -665,6 +708,7 @@ let delayMs = 0;
 let cachedPlayPositionPx = null;
 let lastScrollDistance = null;
 let lastBpm = null;
+let lastMeasureNumber = null;
 let lastTimeText = null;
 let lastSeekPercent = null;
 let seekRectCache = null;
@@ -711,7 +755,18 @@ function videoTimeToState(videoT) {{
     }};
 }}
 
-window.__RHYTHM_ANALYSIS__ = {{ timings, videoTimeToState }};
+function findMeasureNumber(beat) {{
+    let lo = 0;
+    let hi = MEASURE_BOUNDARIES.length;
+    while (lo < hi) {{
+        const mid = (lo + hi) >> 1;
+        if (MEASURE_BOUNDARIES[mid] <= beat + 1e-6) lo = mid + 1;
+        else hi = mid;
+    }}
+    return Math.max(1, Math.min(MEASURE_BOUNDARIES.length, lo));
+}}
+
+window.__RHYTHM_ANALYSIS__ = {{ timings, MEASURE_BOUNDARIES, videoTimeToState, findMeasureNumber }};
 
 function formatBpm(value) {{
     return Number.isInteger(value) ? String(value) : value.toFixed(2).replace(/[.]?0+$/, '');
@@ -854,6 +909,11 @@ function renderFrame(forceUi = false) {{
     if (state.bpm !== lastBpm) {{
         lastBpm = state.bpm;
         bpmNumber.textContent = formatBpm(state.bpm);
+    }}
+    const currentMeasure = findMeasureNumber(state.beat);
+    if (currentMeasure !== lastMeasureNumber) {{
+        lastMeasureNumber = currentMeasure;
+        measureNumber.textContent = String(currentMeasure);
     }}
     syncSeekUi(forceUi);
 }}
