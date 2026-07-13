@@ -536,6 +536,45 @@ class WorkflowTests(unittest.TestCase):
             self.assertEqual(output.read_text(encoding="utf-8"), original)
             extract.assert_not_called()
 
+    def test_render_preview_install_only_installs_viewer_and_builds_bridge(self):
+        viewer = Path("C:/tools/Majdata")
+        bridge = Path("C:/tools/MajdataBridge.exe")
+        with mock.patch.object(sys, "argv", ["render_preview.py", "--install-only"]), \
+             mock.patch.object(render_preview, "install_majdata_view", return_value=viewer) as install, \
+             mock.patch.object(render_preview, "build_bridge", return_value=bridge) as build, \
+             mock.patch("builtins.print"):
+            result = render_preview.main()
+
+        self.assertEqual(result, 0)
+        install.assert_called_once_with()
+        build.assert_called_once_with()
+
+    def test_majdata_installer_extracts_archive_into_version_directory(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / ".tools"
+            archive = root / "downloads" / "Majdata-4.3.1.7z"
+            archive.parent.mkdir(parents=True)
+            archive.write_bytes(b"verified archive")
+            expected_home = root / "majdata" / "4.3.1" / "Majdata"
+
+            def fake_extract(command, check):
+                self.assertTrue(check)
+                self.assertEqual(Path(command[-1]), root / "majdata" / "4.3.1")
+                expected_home.mkdir(parents=True)
+                (expected_home / "MajdataView.exe").write_bytes(b"viewer")
+
+            with mock.patch.object(render_preview, "LOCAL_TOOLS_ROOT", root), \
+                 mock.patch.object(render_preview, "SIBLING_TOOLS_ROOT", root / "sibling"), \
+                 mock.patch.object(
+                     render_preview, "MAJDATA_ARCHIVE_SHA256",
+                     render_preview._file_sha256(archive),
+                 ), \
+                 mock.patch.object(render_preview.shutil, "which", return_value="tar"), \
+                 mock.patch.object(render_preview.subprocess, "run", side_effect=fake_extract):
+                installed = render_preview.install_majdata_view()
+
+            self.assertEqual(installed, expected_home)
+
     def test_variable_bpm_marker_is_rendered(self):
         chart = Chart(
             level=12,

@@ -43,6 +43,7 @@ MAJDATA_ARCHIVE_URL = (
     "https://github.com/LingFeng-bbben/MajdataView/releases/download/"
     "v4.3.1/Majdata-3b329da-5aad37e.7z"
 )
+MAJDATA_ARCHIVE_SHA256 = "e767f71cabaa34713e174791c47d3c3a6b99426fdc2f0b86e47e7d3f16de408a"
 LOCAL_TOOLS_ROOT = ROOT / ".tools"
 SIBLING_TOOLS_ROOT = ROOT.parent / "required-programs" / ".tools"
 BRIDGE_PROJECT = ROOT / "tools" / "src" / "majdata_bridge" / "MajdataBridge.csproj"
@@ -146,11 +147,21 @@ def install_majdata_view() -> Path:
         return detected_home
 
     archive = LOCAL_TOOLS_ROOT / "downloads" / f"Majdata-{MAJDATA_VERSION}.7z"
-    install_root = (LOCAL_TOOLS_ROOT / "majdata" / MAJDATA_VERSION).parent
+    install_root = LOCAL_TOOLS_ROOT / "majdata" / MAJDATA_VERSION
     archive.parent.mkdir(parents=True, exist_ok=True)
     install_root.mkdir(parents=True, exist_ok=True)
-    print(f"  下载 MajdataView v{MAJDATA_VERSION}...")
-    urllib.request.urlretrieve(MAJDATA_ARCHIVE_URL, archive)
+    if archive.is_file() and _file_sha256(archive) == MAJDATA_ARCHIVE_SHA256:
+        print(f"  使用已下载的 MajdataView v{MAJDATA_VERSION} 安装包")
+    else:
+        archive.unlink(missing_ok=True)
+        partial = archive.with_suffix(archive.suffix + ".part")
+        partial.unlink(missing_ok=True)
+        print(f"  下载 MajdataView v{MAJDATA_VERSION}...")
+        urllib.request.urlretrieve(MAJDATA_ARCHIVE_URL, partial)
+        if _file_sha256(partial) != MAJDATA_ARCHIVE_SHA256:
+            partial.unlink(missing_ok=True)
+            raise RuntimeError("MajdataView 安装包 SHA-256 校验失败")
+        partial.replace(archive)
 
     tar = shutil.which("tar")
     if not tar:
@@ -160,6 +171,14 @@ def install_majdata_view() -> Path:
     if not (local_home / "MajdataView.exe").exists():
         raise RuntimeError("MajdataView 解压完成，但未找到 MajdataView.exe")
     return local_home
+
+
+def _file_sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as stream:
+        for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
 
 
 def build_bridge() -> Path:
@@ -856,7 +875,10 @@ def main():
     parser.add_argument("-diff", "--difficulty", type=int, default=None,
                         help="难度 ID；不指定则默认只处理 MASTER/Re:MASTER")
     parser.add_argument("-f", "--force", action="store_true", help="覆盖已有预览视频")
-    parser.add_argument("--install-only", action="store_true", help="只安装 MajdataView")
+    parser.add_argument(
+        "--install-only", action="store_true",
+        help="只安装 MajdataView 并构建 Majdata Bridge",
+    )
     parser.add_argument("--timeout", type=int, default=900, help="单曲录制超时秒数")
     args = parser.parse_args()
 
@@ -864,7 +886,9 @@ def main():
         parser.error("difficulty 必须在 1 到 7 之间")
     majdata_home = install_majdata_view()
     if args.install_only:
+        bridge = build_bridge()
         print(f"MajdataView: {majdata_home}")
+        print(f"Majdata Bridge: {bridge}")
         return 0
 
     base = Path(args.input).resolve() if args.input else ROOT

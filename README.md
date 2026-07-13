@@ -6,8 +6,14 @@
 
 ```powershell
 pip install -r requirements.txt
+powershell -ExecutionPolicy Bypass -File .\tools\setup_tools.ps1
 python -m mra.run_all -d "QZKago Requiem"
 ```
+
+工具安装脚本会从 [MajdataView v4.3.1 官方发布页](https://github.com/LingFeng-bbben/MajdataView/releases/tag/v4.3.1)
+下载并校验 Majdata，然后使用仓库中的源码构建 Majdata Bridge。生成内容保存在
+`.tools/`，无需提交数百 MB 的第三方二进制文件。需要 .NET 8 SDK；重复运行会复用
+已安装的工具。
 
 项目首次处理某个难度时会生成一份默认 `4/4` 的 `meter.json`，之后可以人工加入变拍节点。
 
