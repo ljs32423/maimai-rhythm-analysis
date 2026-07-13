@@ -4,17 +4,19 @@
 
 ## 快速开始
 
+从项目的 [GitHub Releases](https://github.com/ljs32423/maimai-rhythm-analysis/releases)
+下载名称以 `windows-x64-full.zip` 结尾的完整包并解压。完整包已经包含
+MajdataViewX、ffprobe 和 MajdataBridge，运行过程中不会再下载第三方工具。
+
 ```powershell
+cd app
 pip install -r requirements.txt
-powershell -ExecutionPolicy Bypass -File .\tools\setup_tools.ps1
 python -m mra.run_all -d "QZKago Requiem"
 ```
 
-工具安装脚本会从 [MajdataViewX v6.0.0 官方发布页](https://github.com/re-poem/MajdataViewX/releases/tag/v6.0.0)
-下载并校验 MajdataViewX，并从 [ffprobe-static b6.1.1](https://github.com/eugeneware/ffmpeg-static/releases/tag/b6.1.1)
-下载并校验 Windows x64 `ffprobe.exe`。生成内容保存在 `.tools/`，无需提交数百 MB
-的第三方二进制文件；重复运行会复用已安装的工具。旧 MajdataView HTTP 接口与
-Majdata Bridge 仅作为已有手工安装的兼容路径保留，新安装和录制使用 MajdataViewX。
+也可以在 `app` 目录双击 `run_all.bat`。第一次使用前仍需安装 Python 3.11 或更高版本，
+并执行一次 `pip install -r requirements.txt`。源码仓库不提交数百 MB 的第三方二进制，
+因此普通用户应下载 Release 完整包，而不是 GitHub 自动生成的 Source code ZIP。
 
 项目首次处理某个难度时会生成一份默认 `4/4` 的 `meter.json`，之后可以人工加入变拍节点。
 
@@ -97,3 +99,14 @@ Re:MASTER 对应 `outputs/ReMASTER/`。
 ```powershell
 python -m pytest -q
 ```
+
+## 构建发行包
+
+维护者本机准备好 `.tools` 后运行：
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\tools\build_release.ps1 -Version v0.2.0
+```
+
+脚本只打包 MajdataViewX 6.0.0、ffprobe 6.1.1 和 MajdataBridge，不包含歌曲、
+旧版工具、模型文件或下载缓存，并在 `release/` 同时生成 ZIP 和 SHA-256 文件。

@@ -1,16 +1,15 @@
 #!/usr/bin/env python3
 """
-MajdataView 谱面预览视频录制
+MajdataViewX 谱面预览视频录制
 ==============================
-通过 MajdataView (官方 simai 渲染器) 的 HTTP API 自动录制谱面预览视频。
-流程: 安装 MajdataView → 转换 maidata.txt 为 JSON → 通过 HTTP 触发录制 → 等待输出。
+通过 MajdataViewX 的 WebSocket 接口自动录制谱面预览视频，并兼容旧版 HTTP 接口。
+流程: 读取 Release 随附工具 → 转换 maidata.txt 为 JSON → 触发录制 → 等待输出。
 录制完成后生成 outputs/{难度}/video/preview.mp4。
 """
 
 import argparse
 import base64
 import ctypes
-import gzip
 import hashlib
 import json
 import math
@@ -40,23 +39,7 @@ from .song_library import PROJECT_ROOT, discover_song_folders
 
 ROOT = PROJECT_ROOT
 MAJDATA_VERSION = "6.0.0"
-MAJDATA_ARCHIVE_URL = (
-    "https://github.com/re-poem/MajdataViewX/releases/download/"
-    "v6.0.0/MajdataX-v6.0.0-hotfix.zip"
-)
-MAJDATA_ARCHIVE_SHA256 = "e32f77502ba0ca348d8db9cfd2b0c39308ceae0106c006c1d38c80088aab95a1"
 FFPROBE_VERSION = "6.1.1"
-FFPROBE_ARCHIVE_URL = (
-    "https://github.com/eugeneware/ffmpeg-static/releases/download/"
-    "b6.1.1/ffprobe-win32-x64.gz"
-)
-FFPROBE_ARCHIVE_SHA256 = "f309e6223ad89d2fe54bccd420a7709b66fd27540674e92309578ed491a43c8d"
-FFPROBE_EXE_SHA256 = "3a7e2dc003dc2cd1472827e4c7c4f056ae1ae0ae7c5bbc580c99b49827351ba4"
-FFPROBE_LICENSE_URL = (
-    "https://github.com/eugeneware/ffmpeg-static/releases/download/"
-    "b6.1.1/win32-x64.LICENSE"
-)
-FFPROBE_LICENSE_SHA256 = "8ceb4b9ee5adedde47b31e975c1d90c73ad27b6b165a1dcd80c7c545eb65b903"
 LOCAL_TOOLS_ROOT = ROOT / ".tools"
 SIBLING_TOOLS_ROOT = ROOT.parent / "required-programs" / ".tools"
 BRIDGE_PROJECT = ROOT / "tools" / "src" / "majdata_bridge" / "MajdataBridge.csproj"
@@ -110,7 +93,7 @@ def default_majdata_home() -> Path:
         candidate = tools_root / "majdataviewx" / MAJDATA_VERSION
         if (candidate / "MajdataView.exe").exists():
             return candidate
-    # 兼容手工安装在旧目录中的版本；新安装始终使用 majdataviewx/。
+    # 兼容手工安装在旧目录中的版本；Release 始终使用 majdataviewx/。
     for tools_root in tools_roots():
         legacy = tools_root / "majdata" / "4.3.1" / "Majdata"
         if (legacy / "MajdataView.exe").exists():
@@ -156,7 +139,8 @@ def configure_recorder(majdata_home: Path) -> Path:
     return arguments_path
 
 
-def install_majdata_view() -> Path:
+def require_majdata_view() -> Path:
+    """找到 Release 随附的 MajdataViewX；运行时不再下载第三方工具。"""
     env_home = os.environ.get("MAJDATA_HOME")
     if env_home:
         home = Path(env_home).expanduser().resolve()
@@ -164,80 +148,22 @@ def install_majdata_view() -> Path:
             raise FileNotFoundError(f"MAJDATA_HOME 中没有 MajdataView.exe: {home}")
         return home
 
-    for tools_root in tools_roots():
-        detected_home = tools_root / "majdataviewx" / MAJDATA_VERSION
-        if (detected_home / "MajdataView.exe").exists():
-            return detected_home
-
-    archive = LOCAL_TOOLS_ROOT / "downloads" / f"MajdataViewX-{MAJDATA_VERSION}.zip"
-    install_root = LOCAL_TOOLS_ROOT / "majdataviewx" / MAJDATA_VERSION
-    install_root.mkdir(parents=True, exist_ok=True)
-    _download_verified(
-        MAJDATA_ARCHIVE_URL, archive, MAJDATA_ARCHIVE_SHA256,
-        f"MajdataViewX {MAJDATA_VERSION}",
+    detected_home = default_majdata_home()
+    if (detected_home / "MajdataView.exe").exists():
+        return detected_home
+    raise FileNotFoundError(
+        "未找到 MajdataViewX。请使用 GitHub Releases 中的 Windows x64 完整包。"
     )
 
-    tar = shutil.which("tar")
-    if not tar:
-        raise RuntimeError("未找到 tar，无法解压 MajdataViewX 安装包")
-    subprocess.run([tar, "-xf", str(archive), "-C", str(install_root)], check=True)
-    local_home = install_root
-    if not (local_home / "MajdataView.exe").exists():
-        raise RuntimeError("MajdataViewX 解压完成，但未找到 MajdataView.exe")
-    return local_home
 
-
-def _file_sha256(path: Path) -> str:
-    digest = hashlib.sha256()
-    with path.open("rb") as stream:
-        for chunk in iter(lambda: stream.read(1024 * 1024), b""):
-            digest.update(chunk)
-    return digest.hexdigest()
-
-
-def _download_verified(url: str, destination: Path, expected_sha256: str,
-                       label: str) -> Path:
-    if destination.is_file() and _file_sha256(destination) == expected_sha256:
-        return destination
-    destination.unlink(missing_ok=True)
-    partial = destination.with_suffix(destination.suffix + ".part")
-    partial.unlink(missing_ok=True)
-    destination.parent.mkdir(parents=True, exist_ok=True)
-    print(f"  下载 {label}...")
-    urllib.request.urlretrieve(url, partial)
-    if _file_sha256(partial) != expected_sha256:
-        partial.unlink(missing_ok=True)
-        raise RuntimeError(f"{label} SHA-256 校验失败")
-    partial.replace(destination)
-    return destination
-
-
-def install_ffprobe() -> Path:
-    """安装固定版本的 Windows x64 静态 ffprobe，并返回可执行文件路径。"""
-    output_root = LOCAL_TOOLS_ROOT / "ffprobe" / FFPROBE_VERSION
-    executable = output_root / "ffprobe.exe"
-    if executable.is_file() and _file_sha256(executable) == FFPROBE_EXE_SHA256:
+def require_ffprobe() -> str:
+    """找到 Release 随附的 ffprobe；允许用户显式配置系统 PATH。"""
+    executable = find_executable("ffprobe.exe") or find_executable("ffprobe")
+    if executable:
         return executable
-
-    archive = LOCAL_TOOLS_ROOT / "downloads" / f"ffprobe-{FFPROBE_VERSION}-win64.gz"
-    _download_verified(
-        FFPROBE_ARCHIVE_URL, archive, FFPROBE_ARCHIVE_SHA256,
-        f"ffprobe {FFPROBE_VERSION}",
+    raise FileNotFoundError(
+        "未找到 ffprobe。请使用 GitHub Releases 中的 Windows x64 完整包。"
     )
-    output_root.mkdir(parents=True, exist_ok=True)
-    partial = executable.with_suffix(".exe.part")
-    partial.unlink(missing_ok=True)
-    with gzip.open(archive, "rb") as source, partial.open("wb") as destination:
-        shutil.copyfileobj(source, destination)
-    if _file_sha256(partial) != FFPROBE_EXE_SHA256:
-        partial.unlink(missing_ok=True)
-        raise RuntimeError("ffprobe.exe SHA-256 校验失败")
-    partial.replace(executable)
-    _download_verified(
-        FFPROBE_LICENSE_URL, output_root / "LICENSE",
-        FFPROBE_LICENSE_SHA256, "ffprobe 许可证",
-    )
-    return executable
 
 
 def build_bridge() -> Path:
@@ -941,21 +867,13 @@ def main():
     parser.add_argument("-diff", "--difficulty", type=int, default=None,
                         help="难度 ID；不指定则默认只处理 MASTER/Re:MASTER")
     parser.add_argument("-f", "--force", action="store_true", help="覆盖已有预览视频")
-    parser.add_argument(
-        "--install-only", action="store_true",
-        help="只安装 MajdataViewX 与 ffprobe",
-    )
     parser.add_argument("--timeout", type=int, default=900, help="单曲录制超时秒数")
     args = parser.parse_args()
 
     if args.difficulty is not None and not 1 <= args.difficulty <= 7:
         parser.error("difficulty 必须在 1 到 7 之间")
-    majdata_home = install_majdata_view()
-    ffprobe = install_ffprobe()
-    if args.install_only:
-        print(f"MajdataViewX: {majdata_home}")
-        print(f"ffprobe: {ffprobe}")
-        return 0
+    majdata_home = require_majdata_view()
+    require_ffprobe()
 
     base = Path(args.input).resolve() if args.input else ROOT
     songs = [song.path for song in discover_song_folders(base, args.dir)]

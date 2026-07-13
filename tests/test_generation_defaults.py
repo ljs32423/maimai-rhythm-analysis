@@ -28,8 +28,8 @@ class GenerationDefaultTests(unittest.TestCase):
             (song_dir / "maidata.txt").write_text(MAIDATA_MASTER_AND_REMASTER, encoding="utf-8")
 
             with mock.patch.object(sys, "argv", ["render_preview.py", "-i", tmp]), \
-                 mock.patch.object(render_preview, "install_majdata_view", return_value=Path("C:/Majdata")), \
-                 mock.patch.object(render_preview, "install_ffprobe", return_value=Path("C:/ffprobe.exe")), \
+                 mock.patch.object(render_preview, "require_majdata_view", return_value=Path("C:/Majdata")), \
+                 mock.patch.object(render_preview, "require_ffprobe", return_value="C:/ffprobe.exe"), \
                  mock.patch.object(render_preview, "record_preview", return_value=Path("done.mp4")) as record_preview:
                 result = render_preview.main()
 
