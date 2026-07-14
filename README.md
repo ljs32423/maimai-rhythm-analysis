@@ -13,8 +13,6 @@ pip install -r requirements.txt
 python -m mra.run_all -d "QZKago Requiem"
 ```
 
-也可以在 `app` 目录双击 `run_all.bat`。第一次使用前仍需安装 Python 3.11 或更高版本，
-并执行一次 `pip install -r requirements.txt`。
 
 项目首次处理某个难度时会生成一份默认 `4/4` 的 `meter.json`，之后可以人工加入变拍节点。
 
