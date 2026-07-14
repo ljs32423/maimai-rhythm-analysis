@@ -655,7 +655,7 @@ class WorkflowTests(unittest.TestCase):
             self.assertIn('function updateSeekProgress(progress)', html)
             self.assertIn('function updateSpeedUi(value)', html)
             self.assertIn('function updateSeekTip(progress)', html)
-            self.assertIn('function syncSeekUi(force = false)', html)
+            self.assertIn('function syncSeekUi(current, force = false)', html)
             self.assertIn('bpmNumber.textContent = formatBpm(state.bpm)', html)
             self.assertIn('--seek-progress: 0%;', html)
             self.assertIn('background: linear-gradient(to right, #4fc3f7 0%, #4fc3f7 var(--seek-progress), rgba(108, 112, 132, 0.32) var(--seek-progress), rgba(108, 112, 132, 0.32) 100%);', html)
@@ -796,10 +796,16 @@ class WorkflowTests(unittest.TestCase):
             output = make_html.generate_html(str(root), "test", diff_id=6)
             html = Path(output).read_text(encoding="utf-8")
 
-            self.assertIn('"src": "../../../ReMASTER_strip_seg_000.svg"', html)
+            self.assertIn('"src": "../strip/segments/strip_seg_000.svg"', html)
             self.assertIn('"x": 0', html)
-            self.assertIn('virtualStrip.appendChild(object);', html)
+            self.assertIn("const image = document.createElement('img');", html)
+            self.assertIn('virtualStrip.appendChild(image);', html)
             self.assertIn('if (USE_SEGMENTS) {', html)
+            self.assertIn('id="svgScroll" type="image/svg+xml" width="8000" height="60" hidden', html)
+            self.assertNotIn('id="svgScroll" data="../../../ReMASTER_strip.svg"', html)
+            segment_dir = root / "outputs" / "ReMASTER" / "strip" / "segments"
+            self.assertTrue((segment_dir / "strip_seg_000.svg").exists())
+            self.assertTrue((segment_dir / "strip_seg_001.svg").exists())
 
     def test_html_regenerates_when_offset_is_newer_than_output(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -847,8 +853,13 @@ class WorkflowTests(unittest.TestCase):
             self.assertIn('if (timeText !== lastTimeText)', html)
             self.assertIn('if (percent !== lastSeekPercent)', html)
             self.assertIn('const shouldUpdateProgress = force || isSeeking || lastSeekUiTime === null || Math.abs(current - lastSeekUiTime) >= 0.1;', html)
-            self.assertIn('renderFrame();', html)
-            self.assertIn('renderFrame(true);', html)
+            self.assertIn('const state = renderFrame(videoT);', html)
+            self.assertIn('function updateStatusUi(videoT, state, force = false)', html)
+            self.assertIn('const STATUS_UI_INTERVAL_MS = 100;', html)
+            self.assertIn('if (timestamp - lastStatusUiUpdate >= STATUS_UI_INTERVAL_MS)', html)
+            self.assertIn('function getPlaybackTime()', html)
+            self.assertIn('const image = document.createElement(\'img\');', html)
+            self.assertIn('if (firstIndex === lastVisibleFirstIndex && lastIndex === lastVisibleLastIndex) return;', html)
             # seek tip is driven by the drag itself, not every animation frame
             self.assertIn('updateSeekTip(parseFloat(e.target.value) || 0)', html)
             # resize is coalesced into a single animation frame

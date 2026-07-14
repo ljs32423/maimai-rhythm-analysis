@@ -5,7 +5,7 @@ maimai 节奏解析网页生成器
 生成包含谱面预览视频 + Arcaea 风格滚动节奏条的 HTML 页面。
 
 布局: 上方视频 / 下方 SVG 滚动条 (渐隐 mask + 五边形对齐 + 旋转 BPM)
-同步: 视频 currentTime 驱动 SVG 横向滚动，offset 由 align_audio.py 生成
+同步: 视频时间轴校准的平滑时钟驱动 SVG 横向滚动，offset 由 align_audio.py 生成
 
 用法:
   python make_html.py                          # 批量所有歌曲
@@ -21,10 +21,12 @@ from .simai_parser import parse_maidata, time_to_beat
 from .meter import load_meter_map
 from .visualize import (compute_rhythm_events, PX_PER_BEAT, PAD_X,
                         NOTE_AREA_H, LABEL_GAP, LABEL_AREA_H, NOTE_CY, NOTE_R,
-                        NOTE_OUTER_DIAMETER, SEGMENT_BEATS)
+                        NOTE_OUTER_DIAMETER, SEGMENT_BEATS,
+                        render_strip_svg_segments)
 from .difficulty import (DIFFICULTY_NAMES, analysis_html_path, default_target_difficulties,
                          difficulty_file_stem, find_preview_video, legacy_difficulty_path,
-                         offset_file_path, preview_video_candidates, strip_svg_path)
+                         offset_file_path, preview_video_candidates,
+                         strip_segment_base_path, strip_svg_path)
 from .song_library import PROJECT_ROOT, find_song_dirs
 
 # Arcaea 常量 (与 4.py 完全一致)
@@ -138,19 +140,53 @@ def generate_html(song_dir, song_id, diff_id=5, offset=0.0):
     svg_w = int(m_svg.group(1)) if m_svg else 30000
     svg_h = NOTE_AREA_H + LABEL_GAP + LABEL_AREA_H  # compact SVG 高度
     segment_width = SEGMENT_BEATS * PX_PER_BEAT
-    segment_dir = svg_path.parent / 'segments'
-    segment_re = re.compile(r'^strip_seg_(\d{3})\.svg$')
-    if not segment_dir.is_dir():
+    row_beats = max(0.0, (svg_w - PAD_X * 2) / PX_PER_BEAT)
+    expected_segment_count = (max(1, int(math.ceil(row_beats / SEGMENT_BEATS)))
+                              if row_beats > 0 else 0)
+
+    def find_segments(directory, pattern):
+        if not directory.is_dir():
+            return []
+        found = []
+        for name in os.listdir(directory):
+            match = pattern.match(name)
+            if match:
+                found.append((int(match.group(1)), name))
+        found.sort()
+        return found
+
+    modern_segment_dir = strip_segment_base_path(song_root, diff_id).parent
+    modern_segment_re = re.compile(r'^strip_seg_(\d{3})\.svg$')
+    legacy_segment_re = re.compile(rf'^{re.escape(file_stem)}_strip_seg_(\d{{3}})\.svg$')
+
+    def segments_are_complete(found):
+        return [index for index, _name in found] == list(range(expected_segment_count))
+
+    segment_dir = modern_segment_dir
+    found_segments = find_segments(segment_dir, modern_segment_re)
+    if not segments_are_complete(found_segments):
         segment_dir = song_root
-        segment_re = re.compile(rf'^{re.escape(file_stem)}_strip_seg_(\d{{3}})\.svg$')
-    found_segments = []
-    for name in os.listdir(segment_dir):
-        m_segment = segment_re.match(name)
-        if m_segment:
-            found_segments.append((int(m_segment.group(1)), name))
-    found_segments.sort()
+        found_segments = find_segments(segment_dir, legacy_segment_re)
+
+    # 旧产物可能只有一张超长 SVG。生成 HTML 时自动补齐分段 SVG，
+    # 避免网页悄悄退回到整张长图并在滚动时产生明显卡顿。
+    if not segments_are_complete(found_segments):
+        segment_dir = modern_segment_dir
+        segment_base = strip_segment_base_path(song_root, diff_id)
+        try:
+            segment_base.parent.mkdir(parents=True, exist_ok=True)
+            render_strip_svg_segments(
+                compute_rhythm_events(ch), row_beats, song.bpm, ch,
+                str(segment_base), meter_map=meter_map,
+            )
+            found_segments = find_segments(segment_dir, modern_segment_re)
+            if segments_are_complete(found_segments):
+                print(f'  [{song_id}] 已自动补充分段 SVG')
+        except Exception as exc:
+            print(f'  [{song_id}] 分段 SVG 生成失败，将使用完整 SVG: {exc}')
+
     segment_names = []
-    if found_segments:
+    if segments_are_complete(found_segments):
         indexes = [index for index, _name in found_segments]
         if indexes == list(range(len(indexes))):
             segment_names = [name for _index, name in found_segments]
@@ -168,6 +204,19 @@ def generate_html(song_dir, song_id, diff_id=5, offset=0.0):
                 'x': round(x, 3),
                 'width': round(width, 3),
             })
+
+    # 有分段时不要给 fallback <object> 设置 data；即使随后 hidden，浏览器也可能
+    # 已经开始解析整张超长 SVG，抵消虚拟化带来的收益。
+    if segments_js:
+        scrolling_svg_html = (
+            f'<object class="scrolling-svg" id="svgScroll" type="image/svg+xml" '
+            f'width="{svg_w}" height="{svg_h}" hidden></object>'
+        )
+    else:
+        scrolling_svg_html = (
+            f'<object class="scrolling-svg" id="svgScroll" data="{svg_name}" '
+            f'type="image/svg+xml" width="{svg_w}" height="{svg_h}"></object>'
+        )
 
     # 网页滚动单位: 每拍 = PX_PER_BEAT * SVG_SCALE (屏幕像素)。
     rhythm_height = int(math.ceil(svg_h * SVG_SCALE))
@@ -321,6 +370,9 @@ body {{
     position: absolute; top: 0;
     height: {svg_h}px;
     pointer-events: none;
+    display: block;
+    max-width: none;
+    user-select: none;
 }}
 .scrolling-svg {{
     position: absolute; top: 0; left: 0;
@@ -679,7 +731,7 @@ body {{
     <div class="svg-container">
         <div class="scrolling-stage">
             <div class="virtual-strip" id="virtualStrip" aria-hidden="true"></div>
-            <object class="scrolling-svg" id="svgScroll" data="{svg_name}" type="image/svg+xml" width="{svg_w}" height="{svg_h}"></object>
+            {scrolling_svg_html}
         </div>
     </div>
     <div class="left-pentagon" style="background-color: #282828; z-index: 2; left: 0;"></div>
@@ -743,11 +795,22 @@ let seekRectCache = null;
 let resizeRafId = null;
 let timingIndex = 0;
 let lastSeekUiTime = null;
+let lastStatusUiUpdate = 0;
+let playbackClockMediaTime = 0;
+let playbackClockPerfTime = 0;
+let playbackClockLastSync = 0;
+let playbackClockActive = false;
 const USE_SEGMENTS = SEGMENTS.length > 0;
 const segmentElements = new Map();
-let lastVisibleSegmentKey = '';
+let lastVisibleFirstIndex = -1;
+let lastVisibleLastIndex = -1;
+const STATUS_UI_INTERVAL_MS = 100;
+const PLAYBACK_CLOCK_SYNC_INTERVAL_MS = 500;
+const PLAYBACK_CLOCK_MAX_DRIFT_SEC = 0.08;
 if (USE_SEGMENTS) {{
     svgScroll.hidden = true;
+}} else {{
+    console.warn('未检测到分段 SVG，当前页面会使用完整 SVG；请重新生成节奏解析产物。');
 }}
 
 // ===== 视频时间 → beat + 当前 BPM =====
@@ -865,7 +928,7 @@ function setDelay(value) {{
     const clamped = Math.max(-1000, Math.min(1000, Math.round(parsed)));
     delayMs = clamped;
     updateDelayUi(clamped);
-    renderFrame(true);
+    renderAll(true);
 }}
 
 function updateSeekTip(progress) {{
@@ -875,9 +938,8 @@ function updateSeekTip(progress) {{
     seekTip.style.left = `${{clamped * 100}}%`;
 }}
 
-function syncSeekUi(force = false) {{
+function syncSeekUi(current, force = false) {{
     const duration = Number.isFinite(pv.duration) ? pv.duration : 0;
-    const current = videoReady ? pv.currentTime : 0;
     const progress = videoReady && duration > 0 ? current / duration : 0;
     const shouldUpdateProgress = force || isSeeking || lastSeekUiTime === null || Math.abs(current - lastSeekUiTime) >= 0.1;
     if (shouldUpdateProgress) {{
@@ -885,7 +947,7 @@ function syncSeekUi(force = false) {{
         updateSeekProgress(isSeeking ? parseFloat(seekSlider.value) || 0 : progress);
         lastSeekUiTime = current;
     }}
-    const timeText = `${{formatClock(videoReady ? pv.currentTime : 0)}} / ${{formatClock(duration)}}`;
+    const timeText = `${{formatClock(current)}} / ${{formatClock(duration)}}`;
     if (timeText !== lastTimeText) {{
         timeVal.textContent = timeText;
         lastTimeText = timeText;
@@ -899,39 +961,69 @@ function updateVisibleSegments(scrollDistance) {{
     const endX = Math.min(STRIP_WIDTH, scrollDistance + viewportWidth * 1.8);
     const firstIndex = Math.max(0, Math.floor(Math.max(0, startX - PAD_X) / SEGMENT_WIDTH) - 1);
     const lastIndex = Math.min(SEGMENTS.length - 1, Math.ceil(Math.max(0, endX - PAD_X) / SEGMENT_WIDTH) + 1);
-    const visible = [];
-    for (let index = firstIndex; index <= lastIndex; index++) {{
-        if (SEGMENTS[index]) visible.push(index);
-    }}
-    const key = visible.join(',');
-    if (key === lastVisibleSegmentKey) return;
-    lastVisibleSegmentKey = key;
-    const keep = new Set(visible);
+    if (firstIndex === lastVisibleFirstIndex && lastIndex === lastVisibleLastIndex) return;
+    lastVisibleFirstIndex = firstIndex;
+    lastVisibleLastIndex = lastIndex;
     for (const [index, element] of segmentElements) {{
-        if (!keep.has(index)) {{
+        if (index < firstIndex || index > lastIndex) {{
             element.remove();
             segmentElements.delete(index);
         }}
     }}
-    for (const index of visible) {{
+    for (let index = firstIndex; index <= lastIndex; index++) {{
+        if (!SEGMENTS[index]) continue;
         if (segmentElements.has(index)) continue;
         const segment = SEGMENTS[index];
-        const object = document.createElement('object');
-        object.className = 'svg-segment';
-        object.type = 'image/svg+xml';
-        object.data = segment.src;
-        object.width = segment.width;
-        object.height = {svg_h};
-        object.style.left = `${{segment.x}}px`;
-        object.style.width = `${{segment.width}}px`;
-        object.setAttribute('aria-hidden', 'true');
-        virtualStrip.appendChild(object);
-        segmentElements.set(index, object);
+        const image = document.createElement('img');
+        image.className = 'svg-segment';
+        image.src = segment.src;
+        image.width = segment.width;
+        image.height = {svg_h};
+        image.decoding = 'async';
+        image.loading = 'eager';
+        image.draggable = false;
+        image.style.left = `${{segment.x}}px`;
+        image.style.width = `${{segment.width}}px`;
+        image.setAttribute('aria-hidden', 'true');
+        image.alt = '';
+        virtualStrip.appendChild(image);
+        segmentElements.set(index, image);
     }}
 }}
 
-function renderFrame(forceUi = false) {{
-    const videoT = videoReady ? pv.currentTime : 0;
+function resetPlaybackClock(mediaTime = videoReady ? pv.currentTime : 0, active = isPlaying && !isSeeking && !pv.paused && !pv.ended) {{
+    const now = performance.now();
+    playbackClockMediaTime = Number.isFinite(mediaTime) ? mediaTime : 0;
+    playbackClockPerfTime = now;
+    playbackClockLastSync = now;
+    playbackClockActive = active;
+}}
+
+function getPlaybackTime() {{
+    const actual = videoReady && Number.isFinite(pv.currentTime) ? pv.currentTime : 0;
+    if (!playbackClockActive || !isPlaying || isSeeking || pv.paused || pv.seeking || pv.readyState < 2) {{
+        return actual;
+    }}
+    const now = performance.now();
+    let predicted = playbackClockMediaTime + (now - playbackClockPerfTime) / 1000 * pv.playbackRate;
+    if (now - playbackClockLastSync >= PLAYBACK_CLOCK_SYNC_INTERVAL_MS) {{
+        playbackClockLastSync = now;
+        const drift = actual - predicted;
+        if (Math.abs(drift) > PLAYBACK_CLOCK_MAX_DRIFT_SEC) {{
+            playbackClockMediaTime = actual;
+            playbackClockPerfTime = now;
+            predicted = actual;
+        }} else {{
+            // 小偏差分次吸收，既维持同步，又避免 currentTime 量化造成节奏条跳动。
+            playbackClockMediaTime += drift * 0.2;
+            predicted += drift * 0.2;
+        }}
+    }}
+    const duration = Number.isFinite(pv.duration) ? pv.duration : predicted;
+    return Math.max(0, Math.min(duration, predicted));
+}}
+
+function renderFrame(videoT) {{
     const state = videoTimeToState(videoT);
     if (cachedPlayPositionPx === null) {{
         const markerRect = playMarker.getBoundingClientRect();
@@ -948,6 +1040,10 @@ function renderFrame(forceUi = false) {{
         }}
         lastScrollDistance = displayScrollDistance;
     }}
+    return state;
+}}
+
+function updateStatusUi(videoT, state, force = false) {{
     if (state.bpm !== lastBpm) {{
         lastBpm = state.bpm;
         bpmNumber.textContent = formatBpm(state.bpm);
@@ -962,7 +1058,13 @@ function renderFrame(forceUi = false) {{
         lastMeterSignature = currentMeter;
         meterSignature.textContent = currentMeter;
     }}
-    syncSeekUi(forceUi);
+    syncSeekUi(videoT, force);
+}}
+
+function renderAll(forceUi = false) {{
+    const videoT = videoReady ? getPlaybackTime() : 0;
+    const state = renderFrame(videoT);
+    updateStatusUi(videoT, state, forceUi);
 }}
 
 function setVideoAvailable(available) {{
@@ -976,13 +1078,18 @@ function setVideoAvailable(available) {{
     speedInput.disabled = !available;
     delaySlider.disabled = !available;
     delayInput.disabled = !available;
-    if (!available) syncSeekUi(true);
+    if (!available) syncSeekUi(0, true);
 }}
 
 // ===== 滚动 =====
-function updateScroll() {{
+function updateScroll(timestamp) {{
     if (!isPlaying) return;
-    renderFrame();
+    const videoT = getPlaybackTime();
+    const state = renderFrame(videoT);
+    if (timestamp - lastStatusUiUpdate >= STATUS_UI_INTERVAL_MS) {{
+        updateStatusUi(videoT, state);
+        lastStatusUiUpdate = timestamp;
+    }}
     rafId = requestAnimationFrame(updateScroll);
 }}
 
@@ -998,7 +1105,8 @@ function play() {{
         console.warn('video play:', e);
         pause();
     }});
-    updateScroll();
+    resetPlaybackClock(pv.currentTime, false);
+    rafId = requestAnimationFrame(updateScroll);
 }}
 
 function pause() {{
@@ -1007,13 +1115,16 @@ function pause() {{
     btnPlay.title = '播放';
     btnPlay.setAttribute('aria-label', '播放');
     pv.pause();
+    resetPlaybackClock(pv.currentTime, false);
     if (rafId) cancelAnimationFrame(rafId);
+    rafId = null;
 }}
 
 function rewind() {{
     pause();
     if (videoReady) pv.currentTime = 0;
-    renderFrame(true);
+    resetPlaybackClock(0, false);
+    renderAll(true);
 }}
 
 btnPlay.addEventListener('click', () => {{ if (isPlaying) pause(); else play(); }});
@@ -1027,7 +1138,8 @@ seekSlider.addEventListener('input', (e) => {{
         pv.currentTime = parseFloat(e.target.value) * duration;
     }}
     updateSeekTip(parseFloat(e.target.value) || 0);
-    renderFrame(true);
+    resetPlaybackClock(pv.currentTime, false);
+    renderAll(true);
 }});
 seekSlider.addEventListener('pointermove', (e) => {{
     if (seekRectCache === null) seekRectCache = seekSlider.getBoundingClientRect();
@@ -1038,7 +1150,8 @@ seekSlider.addEventListener('pointerleave', () => {{ seekRectCache = null; }});
 seekSlider.addEventListener('change', () => {{
     isSeeking = false;
     seekWrap.classList.remove('seeking');
-    syncSeekUi(true);
+    resetPlaybackClock();
+    syncSeekUi(pv.currentTime, true);
 }});
 seekSlider.addEventListener('pointerdown', () => seekWrap.classList.add('seeking'));
 seekSlider.addEventListener('pointerup', () => {{
@@ -1070,28 +1183,39 @@ document.addEventListener('keydown', (e) => {{
         e.preventDefault();
         if (videoReady) {{
             pv.currentTime = Math.max(0, pv.currentTime - 1);
-            renderFrame(true);
+            resetPlaybackClock();
+            renderAll(true);
         }}
     }} else if (e.code === 'ArrowRight') {{
         e.preventDefault();
         if (videoReady) {{
             const duration = Number.isFinite(pv.duration) ? pv.duration : pv.currentTime + 1;
             pv.currentTime = Math.min(duration, pv.currentTime + 1);
-            renderFrame(true);
+            resetPlaybackClock();
+            renderAll(true);
         }}
     }}
 }});
 
 pv.addEventListener('ended', () => pause());
+pv.addEventListener('playing', () => resetPlaybackClock(pv.currentTime, true));
+pv.addEventListener('waiting', () => resetPlaybackClock(pv.currentTime, false));
+pv.addEventListener('seeking', () => resetPlaybackClock(pv.currentTime, false));
+pv.addEventListener('seeked', () => {{
+    resetPlaybackClock();
+    renderAll(true);
+}});
+pv.addEventListener('ratechange', () => resetPlaybackClock());
 pv.addEventListener('timeupdate', () => {{
-    if (!isPlaying) renderFrame(true);
+    if (!isPlaying) renderAll(true);
 }});
 pv.addEventListener('loadedmetadata', () => {{
     setVideoAvailable(true);
     seekSlider.value = 0;
     pv.playbackRate = parseFloat(speedSlider.value) || 1;
     updateSpeedUi(pv.playbackRate);
-    renderFrame(true);
+    resetPlaybackClock(0, false);
+    renderAll(true);
 }});
 pv.addEventListener('error', () => setVideoAvailable(false));
 window.addEventListener('resize', () => {{
@@ -1100,7 +1224,7 @@ window.addEventListener('resize', () => {{
         resizeRafId = null;
         cachedPlayPositionPx = null;
         seekRectCache = null;
-        renderFrame(true);
+        renderAll(true);
     }});
 }});
 
@@ -1108,7 +1232,8 @@ window.addEventListener('resize', () => {{
 updateSpeedUi(parseFloat(speedSlider.value) || 1);
 updateDelayUi(0);
 setVideoAvailable(pv.readyState >= 1);
-renderFrame(true);
+resetPlaybackClock(0, false);
+renderAll(true);
 </script>
 </body>
 </html>"""
