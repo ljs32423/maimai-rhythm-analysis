@@ -84,6 +84,19 @@ def strip_segment_base_path(song_dir: str | Path, difficulty_id: int) -> Path:
     return difficulty_output_path(song_dir, difficulty_id, "strip", "segments") / "strip"
 
 
+def player_output_dir(song_dir: str | Path, difficulty_id: int) -> Path:
+    """Return the native desktop-player output directory."""
+    return difficulty_output_dir(song_dir, difficulty_id) / "player"
+
+
+def player_manifest_path(song_dir: str | Path, difficulty_id: int) -> Path:
+    return player_output_dir(song_dir, difficulty_id) / "manifest.json"
+
+
+def player_scene_path(song_dir: str | Path, difficulty_id: int) -> Path:
+    return player_output_dir(song_dir, difficulty_id) / "scene.json"
+
+
 def legacy_difficulty_path(song_dir: str | Path, difficulty_id: int, suffix: str) -> Path:
     """返回旧版扁平产物路径，用于兼容和迁移。suffix 形如 '_preview.mp4'。"""
     return Path(song_dir) / f"{difficulty_file_stem(difficulty_id)}{suffix}"

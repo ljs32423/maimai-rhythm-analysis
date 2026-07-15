@@ -2,12 +2,13 @@
 """
 maimai 节奏解析 一键生成
 ========================
-按顺序自动执行五个步骤:
+按顺序自动执行六个步骤:
   1. init_meter     — 生成默认 4/4 拍号文件
   2. visualize      — 用拍号时间轴生成节奏解析图片 (SVG + PNG)
   3. render_preview — 从 maidata.txt 生成缺失的谱面预览视频 (MajdataView)
   4. align_audio    — 自动对齐视频音轨与谱面 (首个 tap 检测)
   5. make_html      — 生成网页版 (谱面预览视频 + 滚动节奏条)
+  6. export_player  — 导出原生桌面播放器 manifest/scene
 
 各步骤相互独立，某步失败不会阻断后续步骤。
 用法:
@@ -61,7 +62,7 @@ def run_step(name, script, args_list, force=False):
 
 
 def main():
-    """主入口：解析参数 → 发现歌曲 → 依次运行 5 个步骤。"""
+    """主入口：解析参数 → 发现歌曲 → 依次运行 6 个步骤。"""
     ap = argparse.ArgumentParser(description='maimai 节奏解析一键生成')
     ap.add_argument('-i', '--input', default=None, help='歌曲根目录')
     ap.add_argument('-d', '--dir', default=None, help='只处理指定曲目名')
@@ -83,14 +84,15 @@ def main():
 
     common = ['-i', args.input] if args.input else []
 
-    # 五个步骤: (名称, 脚本路径, 是否传递 -f, 是否附加 offset)
+    # 六个步骤: (名称, 脚本路径, 是否传递 -f, 是否附加 offset)
     # 人工拍号、预览视频和音频对齐结果都不响应 run_all -f。
     steps = [
-        ('1/5 拍号文件', 'mra.init_meter', False, False),
-        ('2/5 节奏解析图片', 'mra.visualize', True, False),
-        ('3/5 谱面预览视频', 'mra.render_preview', False, False),
-        ('4/5 音频自动对齐', 'mra.align_audio', False, False),
-        ('5/5 网页版预览', 'mra.make_html', True, True),
+        ('1/6 拍号文件', 'mra.init_meter', False, False),
+        ('2/6 节奏解析图片', 'mra.visualize', True, False),
+        ('3/6 谱面预览视频', 'mra.render_preview', False, False),
+        ('4/6 音频自动对齐', 'mra.align_audio', False, False),
+        ('5/6 网页版预览', 'mra.make_html', True, True),
+        ('6/6 桌面播放器数据', 'mra.export_player', True, False),
     ]
 
     ok_all = True
