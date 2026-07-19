@@ -24,6 +24,7 @@ python -m mra.run_all -d "QZKago Requiem"
 songs/
 └── 某首歌/
     ├── maidata.txt    # 谱面
+    ├── maidata_sweep.txt # 首次可视化时自动生成；人工扫键头标记谱面
     ├── track.mp3      # 音频
     ├── bg.png         # 背景图
     └── pv.mp4         # PV 视频（可选）
@@ -43,8 +44,8 @@ python -m mra.run_all -d "曲名" -diff 5 -f   # 指定难度 + 强制覆盖
 
 `-diff`: `1`=EASY `2`=BASIC `3`=ADVANCED `4`=EXPERT `5`=MASTER `6`=Re:MASTER `7`=UTOPIA
 
-`-f` 只强制重建图片和网页，不会覆盖已有 `meter.json`、谱面预览视频或
-`offset.txt` 音频对齐结果。
+`-f` 强制重建可视化，但不会覆盖已有 `maidata_sweep.txt`、`meter.json`、
+谱面预览视频或 `offset.txt` 音频对齐结果。
 
 ### 分步执行
 
@@ -75,6 +76,30 @@ Simai 格式没有拍号字段，首次运行时会在 `outputs/<难度>/meter/m
 ```
 
 修改拍号后，运行 `python -m mra.visualize -d "曲名" -diff 5 -f` 即可重新生成图片。
+
+### 扫键头人工修正
+
+首次生成可视化时，程序会复制 `maidata.txt` 为歌曲目录下的
+`maidata_sweep.txt`，并在机器识别到的扫键头音符组末尾加入 `/S`。
+从此以后完全以这份人工文件为准：有 `/S` 就标记，没有就不标记。
+漏判时手动加入 `/S`，误判时直接删除已有的 `/S`。
+
+例如：
+
+```text
+{32}5/7h[1:0]/S,8,1,2,3,4,
+```
+
+人工文件不会被 `-f` 覆盖。只应增删 `/S`，不要修改其中的谱面时间结构；
+如果原始 `maidata.txt` 已变化，程序会保留人工文件并输出提示。需要重新初始化时，
+删除 `maidata_sweep.txt` 后再次运行即可。
+
+修改标记后，运行以下任一命令重建可视化：
+
+```powershell
+python -m mra.run_all -d "曲名" -diff 5 -f
+python -m mra.visualize -d "曲名" -diff 5 -f
+```
 
 ## 输出结构
 

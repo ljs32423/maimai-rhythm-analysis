@@ -20,6 +20,7 @@ from .difficulty import (
     offset_file_path,
     player_manifest_path,
     player_scene_path,
+    sweep_maidata_path,
 )
 from .meter import ensure_meter_file
 from .simai_parser import parse_maidata, time_to_beat
@@ -34,8 +35,10 @@ from .visualize import (
     _prim_x_bounds,
     build_primitives,
     compute_rhythm_events,
+    ensure_sweep_maidata_for_song,
     row_width_px,
 )
+from .sweep_marks import apply_sweep_maidata
 
 SCHEMA_VERSION = 1
 
@@ -127,8 +130,10 @@ def _file_fingerprints(song_dir: Path, difficulty: int,
                        preview: Path | None, offset: Path | None) -> dict[str, Any]:
     maidata = song_dir / "maidata.txt"
     meter = meter_file_path(song_dir, difficulty)
+    sweep_maidata = sweep_maidata_path(song_dir)
     result: dict[str, Any] = {
         "maidata_sha256": _sha256(maidata),
+        "sweep_maidata_sha256": _sha256(sweep_maidata),
         "meter_sha256": _sha256(meter),
         "offset_sha256": _sha256(offset) if offset else None,
     }
@@ -153,6 +158,7 @@ def export_player(song_dir: str | Path, difficulty: int,
     chart = song.charts[difficulty]
     if not chart.notes:
         raise ValueError(f"{song.title} difficulty {difficulty} contains no notes")
+    ensure_sweep_maidata_for_song(song_root, song)
 
     last_note_time = max(note.time_sec + note.duration_sec for note in chart.notes)
     last_note_beat = time_to_beat(last_note_time, chart.bpm_timeline)
@@ -177,6 +183,7 @@ def export_player(song_dir: str | Path, difficulty: int,
             pass
 
     events = compute_rhythm_events(chart)
+    apply_sweep_maidata(events, song_root, difficulty)
     primitives, _ = build_primitives(
         events, row_beats, total_beats, song.bpm, chart, meter_map,
     )

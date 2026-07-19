@@ -22,12 +22,13 @@ from .meter import load_meter_map
 from .visualize import (compute_rhythm_events, PX_PER_BEAT, PAD_X,
                         NOTE_AREA_H, LABEL_GAP, LABEL_AREA_H, NOTE_CY, NOTE_R,
                         NOTE_OUTER_DIAMETER, SEGMENT_BEATS,
-                        render_strip_svg_segments)
+                        ensure_sweep_maidata_for_song, render_strip_svg_segments)
 from .difficulty import (DIFFICULTY_NAMES, analysis_html_path, default_target_difficulties,
                          difficulty_file_stem, find_preview_video, legacy_difficulty_path,
                          offset_file_path, preview_video_candidates,
                          strip_segment_base_path, strip_svg_path)
 from .song_library import PROJECT_ROOT, find_song_dirs
+from .sweep_marks import apply_sweep_maidata
 
 # Arcaea 常量 (与 4.py 完全一致)
 # 降低滚动条整体缩放，等价于降低屏幕上“每拍经过的像素数”，从而减慢观感滚动速度。
@@ -92,11 +93,20 @@ def generate_html(song_dir, song_id, diff_id=5, offset=0.0):
         print(f'  [{song_id}] 无 {svg_path.relative_to(song_root) if svg_path.is_relative_to(song_root) else svg_path}, 请先运行 visualize.py -f'); return
 
     song = parse_maidata(maidata)
+    sweep_path, sweep_created = ensure_sweep_maidata_for_song(song_root, song)
+    if sweep_created:
+        print(f'  [{song_id}] 已创建人工扫键标记文件 {sweep_path.name}')
     if diff_id not in song.charts:
         print(f'  [{song_id}] 无难度 {diff_name}'); return
     ch = song.charts[diff_id]
     if not ch.notes:
         return
+    rhythm_events = compute_rhythm_events(ch)
+    sweep_result = apply_sweep_maidata(rhythm_events, song_root, diff_id)
+    if sweep_result.created:
+        print(f'  [{song_id}] 已创建人工扫键标记文件 {sweep_result.path.name}')
+    for warning in sweep_result.warnings:
+        print(f'  [{song_id}] 扫键标记警告: {warning}')
 
     bpm = song.bpm
     bpm_values = [value for _, value in ch.bpm_timeline] or [bpm]
@@ -176,7 +186,7 @@ def generate_html(song_dir, song_id, diff_id=5, offset=0.0):
         try:
             segment_base.parent.mkdir(parents=True, exist_ok=True)
             render_strip_svg_segments(
-                compute_rhythm_events(ch), row_beats, song.bpm, ch,
+                rhythm_events, row_beats, song.bpm, ch,
                 str(segment_base), meter_map=meter_map,
             )
             found_segments = find_segments(segment_dir, modern_segment_re)
@@ -430,6 +440,7 @@ body {{
     display: flex; gap: 4px; align-items: center; flex: 0 0 auto;
 }}
 .measure-status {{
+    --status-number-size: 14px;
     display: flex; align-items: baseline; gap: 4px; flex: 0 0 auto;
     min-width: 82px; height: 28px; padding: 4px 10px;
     border-radius: 999px;
@@ -440,14 +451,16 @@ body {{
     font-size: 9px; font-weight: 700; white-space: nowrap;
 }}
 .measure-status strong {{
-    color: #fff; font-family: Consolas, monospace; font-size: 14px;
+    color: #fff; font-family: Consolas, monospace; font-size: var(--status-number-size);
     line-height: 1; font-variant-numeric: tabular-nums;
 }}
 .measure-status em {{
     color: rgba(191,195,211,0.68); font-family: Consolas, monospace;
-    font-size: 9px; font-style: normal; font-variant-numeric: tabular-nums;
+    font-size: var(--status-number-size); line-height: 1;
+    font-style: normal; font-variant-numeric: tabular-nums;
 }}
 .meter-status {{
+    --status-number-size: 14px;
     display: flex; align-items: baseline; gap: 5px; flex: 0 0 auto;
     min-width: 68px; height: 28px; padding: 4px 10px;
     border-radius: 999px;
@@ -458,7 +471,7 @@ body {{
     font-size: 9px; font-weight: 700; white-space: nowrap;
 }}
 .meter-status strong {{
-    color: #fff; font-family: Consolas, monospace; font-size: 13px;
+    color: #fff; font-family: Consolas, monospace; font-size: var(--status-number-size);
     line-height: 1; font-variant-numeric: tabular-nums;
 }}
 .speed-delay-group {{
@@ -653,9 +666,9 @@ body {{
     .control-buttons {{ gap: 4px; }}
     .controls button {{ width: 24px; height: 24px; }}
     .measure-status {{ min-width: 72px; height: 26px; padding: 3px 8px; }}
-    .measure-status strong {{ font-size: 13px; }}
+    .measure-status {{ --status-number-size: 13px; }}
     .meter-status {{ min-width: 62px; height: 26px; padding: 3px 8px; }}
-    .meter-status strong {{ font-size: 12px; }}
+    .meter-status {{ --status-number-size: 13px; }}
     .seek-wrap {{ flex-basis: 190px; padding: 2px 6px; }}
     .seek-wrap input[type=range] {{ min-width: 70px; }}
     .speed-wrap {{ padding: 2px 6px; gap: 5px; }}

@@ -33,9 +33,10 @@ from .simai_parser import (parse_maidata, NoteType, Note, Chart, SongData,
 from .difficulty import (DIFFICULTY_NAMES, default_target_difficulties,
                          difficulty_file_stem, legacy_difficulty_path,
                          rhythm_png_path, rhythm_svg_path, strip_segment_base_path,
-                         strip_svg_path)
+                         strip_svg_path, sweep_maidata_path)
 from .meter import MeterMap, ensure_meter_file
 from .song_library import PROJECT_ROOT, find_song_dirs
+from .sweep_marks import apply_sweep_maidata, ensure_sweep_maidata
 
 # ============ 全局样式 ============
 # 尝试加载中文字体
@@ -111,6 +112,9 @@ RUN_INFERENCE_TUPLET_MAX_PHASE_ERROR = 0.09
 RUN_INFERENCE_QUINTUPLET_MAX_REL_SPREAD = 0.26
 RUN_INFERENCE_QUINTUPLET_MAX_PHASE_ERROR = 0.22
 RUN_INFERENCE_MAX_NORMALIZED_BEATS = 1.0
+SWEEP_MIN_NOTES = 3
+SWEEP_MAX_INTERVAL_BEATS = 4 / 24  # 24分音符，或更密
+SWEEP_INTERVAL_TOLERANCE = 1e-6
 
 
 def snap_fraction(decimal: float, allowed_denoms) -> Fraction:
@@ -345,6 +349,87 @@ def _infer_delta_fractions(deltas: list[float]) -> list[Fraction]:
     return chosen
 
 
+def _event_outer_buttons(event) -> frozenset[int]:
+    """Return the pressed outer buttons, excluding synthetic slide objects."""
+    return frozenset(
+        note.button
+        for note in event.get('notes', [])
+        if note.note_type != NoteType.SLIDE and 1 <= note.button <= 8
+    )
+
+
+def _event_single_outer_button(event) -> int | None:
+    """Return the one pressed outer button in an event, or None for chords/touch."""
+    buttons = _event_outer_buttons(event)
+    return next(iter(buttons)) if len(buttons) == 1 else None
+
+
+def _is_dense_sweep_gap(events, left: int, right: int) -> bool:
+    gap = events[right]['beat'] - events[left]['beat']
+    return (SWEEP_INTERVAL_TOLERANCE < gap <=
+            SWEEP_MAX_INTERVAL_BEATS + SWEEP_INTERVAL_TOLERANCE)
+
+
+def _outer_button_direction(current: int, following: int) -> int:
+    delta = (following - current) % 8
+    if delta == 1:
+        return 1
+    if delta == 7:
+        return -1
+    return 0
+
+
+def _sweep_step(events, left: int, right: int) -> int:
+    """Return +1/-1 for one dense clockwise/counterclockwise outer-button step."""
+    if not _is_dense_sweep_gap(events, left, right):
+        return 0
+    current = _event_single_outer_button(events[left])
+    following = _event_single_outer_button(events[right])
+    if current is None or following is None:
+        return 0
+    return _outer_button_direction(current, following)
+
+
+def _sweep_start_direction(events, index: int) -> int:
+    """Return a sweep direction when the head is a single note or a two-note chord."""
+    if index + 2 >= len(events) or not _is_dense_sweep_gap(events, index, index + 1):
+        return 0
+
+    head_buttons = _event_outer_buttons(events[index])
+    if not 1 <= len(head_buttons) <= 2:
+        return 0
+
+    direction = _sweep_step(events, index + 1, index + 2)
+    if direction == 0:
+        return 0
+    second = _event_single_outer_button(events[index + 1])
+    expected_head = ((second - direction - 1) % 8) + 1
+    return direction if expected_head in head_buttons else 0
+
+
+def _mark_sweep_starts(events) -> None:
+    """Mark the first event of every dense, one-directional three-button staircase."""
+    for event in events:
+        event['is_sweep_start'] = False
+
+    index = 0
+    while index + SWEEP_MIN_NOTES - 1 < len(events):
+        direction = _sweep_start_direction(events, index)
+        if direction == 0:
+            index += 1
+            continue
+
+        end = index + SWEEP_MIN_NOTES - 1
+        while end + 1 < len(events) and _sweep_step(events, end, end + 1) == direction:
+            end += 1
+
+        if end - index + 1 >= SWEEP_MIN_NOTES:
+            events[index]['is_sweep_start'] = True
+
+        # The last note can also be the turning point of a sweep in the other direction.
+        index = end
+
+
 def compute_rhythm_events(chart: Chart):
     """
     将 Chart 的原始音符列表转换为节奏事件列表。
@@ -404,7 +489,25 @@ def compute_rhythm_events(chart: Chart):
         result.append({'time': t, 'beat': b, 'display_beat': display_b, 'notes': grp,
                        'nv': nv_for_style, 'nv_label': nv_label,
                        'style_label': style_label})
+    _mark_sweep_starts(result)
     return result
+
+
+def ensure_sweep_maidata_for_song(song_dir: str | Path,
+                                  song: SongData) -> tuple[Path, bool]:
+    """首次创建人工谱时，用机器结果一次性初始化所有难度的 /S。"""
+    existing = sweep_maidata_path(song_dir)
+    if existing.is_file():
+        return existing, False
+    sweep_times_by_difficulty = {}
+    for difficulty, chart in song.charts.items():
+        events = compute_rhythm_events(chart)
+        sweep_times_by_difficulty[difficulty] = [
+            float(event['time'])
+            for event in events
+            if event.get('is_sweep_start')
+        ]
+    return ensure_sweep_maidata(song_dir, sweep_times_by_difficulty)
 
 
 # ============ 几何常量 ============
@@ -420,6 +523,7 @@ NOTE_RING_R = NOTE_R + NOTE_RING_GAP + NOTE_RING_W / 2
 NOTE_OUTER_DIAMETER = 2 * (NOTE_RING_R + NOTE_RING_W / 2)
 NOTE_RING_DASH = '3 2'    # 保护套 TAP / TOUCH 的虚线外环
 BREAK_RING_COLOR = '#ff5a36'
+SWEEP_RING_COLOR = '#ff2bd6'  # 扫键首键：高亮品红，与时值填色和 Break 橙红区分
 NOTE_AREA_H = 46          # 黑色音符区加高，让小节线在节奏点后仍有可见长度
 LABEL_AREA_H = 14         # 标注区高度 (白色底色, 显示时值文本)
 ROW_GAP = 12              # 行间距
@@ -472,13 +576,18 @@ def _note_requires_press(note):
     return note.note_type != NoteType.SLIDE
 
 
-def _event_ring_style(notes):
+def _event_ring_style(notes, is_sweep_start=False):
     has_break = any(note.is_break for note in notes)
     pressable_notes = [note for note in notes if _note_requires_press(note)]
     all_protected = bool(pressable_notes) and all(
         _note_has_protected_judgement(note) for note in pressable_notes
     )
-    color = BREAK_RING_COLOR if has_break else '#ffffff'
+    if has_break:
+        color = BREAK_RING_COLOR
+    elif is_sweep_start:
+        color = SWEEP_RING_COLOR
+    else:
+        color = '#ffffff'
     dash = NOTE_RING_DASH if all_protected else ''
     return color, dash
 
@@ -552,8 +661,12 @@ def build_primitives(events, row_beats, total_beats, bpm, chart, meter_map=None)
             prims.append(('line', 0, y0 + ROW_H - ROW_GAP / 2,
                           W_row, y0 + ROW_H - ROW_GAP / 2, '#333344', 0.6))
 
-    # BPM 变化点。横轴按拍数绘制，因此变速不会改变谱面间距；标记用于说明实时速度变化。
+    # BPM 变化点。重复声明当前 BPM 不构成变速，因此不在节奏条上重复标注。
+    previous_bpm = chart.bpm_timeline[0][1] if chart.bpm_timeline else bpm
     for change_time, change_bpm in chart.bpm_timeline[1:]:
+        if change_bpm == previous_bpm:
+            continue
+        previous_bpm = change_bpm
         change_beat = time_to_beat(change_time, chart.bpm_timeline)
         if change_beat < 0 or change_beat > total_beats:
             continue
@@ -602,7 +715,9 @@ def build_primitives(events, row_beats, total_beats, bpm, chart, meter_map=None)
             is_dotted = ev.get('style_label', ev['nv_label']).endswith('.')
             tup = tuplet_judge(nv) if nv not in (None, '-') else 1
             event_notes = ev.get('notes') or []
-            ring_color, ring_dash = _event_ring_style(event_notes)
+            ring_color, ring_dash = _event_ring_style(
+                event_notes, ev.get('is_sweep_start', False)
+            )
 
             # 音符头: 统一圆点
             if is_dotted:
@@ -969,6 +1084,10 @@ def process_song(song_dir, song_id, force=False, difficulties=None):
     except Exception as e:
         return {'song_id': song_id, 'error': f'parse: {e}'}
 
+    sweep_path, sweep_created = ensure_sweep_maidata_for_song(song_dir, song)
+    if sweep_created:
+        print(f'  [{song_id}] 已创建人工扫键标记文件 {sweep_path.name}')
+
     selected_difficulties = (sorted(song.charts) if difficulties is None
                              else [did for did in difficulties if did in song.charts])
     stats = {'song_id': song_id, 'title': song.title, 'artist': song.artist,
@@ -980,6 +1099,9 @@ def process_song(song_dir, song_id, force=False, difficulties=None):
         migrate_legacy_visual_outputs(song_dir, did, force=force)
         segment_base = strip_segment_base_path(song_dir, did)
         events = compute_rhythm_events(ch)
+        sweep_result = apply_sweep_maidata(events, song_dir, did)
+        for warning in sweep_result.warnings:
+            print(f'  [{song_id}] 扫键标记警告: {warning}')
         # 先读取或初始化拍号文件，让所有输出共用同一份人工小节时间轴。
         last_note_beat = time_to_beat(max(n.time_sec for n in ch.notes), ch.bpm_timeline)
         meter_map = ensure_meter_file(song_dir, did, last_note_beat)

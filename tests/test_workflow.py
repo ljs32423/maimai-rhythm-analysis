@@ -573,6 +573,26 @@ class WorkflowTests(unittest.TestCase):
         labels = [primitive[3] for primitive in primitives if primitive[0] == 'text']
         self.assertIn('BPM 240', labels)
 
+    def test_repeated_same_bpm_marker_is_not_rendered(self):
+        chart = Chart(
+            level=12,
+            designer="Tester",
+            bpm_timeline=[
+                (0.0, 120.0),
+                (1.0, 120.0),
+                (2.0, 240.0),
+                (3.0, 240.0),
+                (4.0, 120.0),
+            ],
+        )
+        primitives, _ = visualize.build_primitives([], 16, 16, 120, chart)
+        labels = [
+            primitive[3]
+            for primitive in primitives
+            if primitive[0] == 'text' and str(primitive[3]).startswith('BPM ')
+        ]
+        self.assertEqual(['BPM 240', 'BPM 120'], labels)
+
     def test_measure_boundary_keeps_sixteenth_subdivision_dots(self):
         chart = Chart(level=12, designer="Tester", bpm_timeline=[(0.0, 120.0)])
         primitives, _ = visualize.build_primitives([], 8, 8, 120, chart)
@@ -877,6 +897,68 @@ class WorkflowTests(unittest.TestCase):
         self.assertEqual(visualize.LABEL_GAP, 0)
         self.assertEqual(visualize.NOTE_RING_W, 1.0)
         self.assertEqual(visualize.NOTE_RING_GAP, 1.0)
+
+    def test_sweep_marks_first_note_with_highlight_ring(self):
+        notes, timeline, _ = parse_inote("{24}1,2,3,4,5,E", 120)
+        chart = Chart(level=12, designer="Tester", notes=notes, bpm_timeline=timeline)
+        events = visualize.compute_rhythm_events(chart)
+
+        self.assertEqual(
+            [event['is_sweep_start'] for event in events],
+            [True, False, False, False, False],
+        )
+
+        primitives, _ = visualize.build_primitives(events, 4, 2, 120, chart)
+        rings = [primitive for primitive in primitives if primitive[0] == 'ring']
+        self.assertEqual(rings[0][4], visualize.SWEEP_RING_COLOR)
+        self.assertTrue(all(ring[4] != visualize.SWEEP_RING_COLOR for ring in rings[1:]))
+
+    def test_sweep_supports_reverse_wrap_and_equivalent_48th_grid(self):
+        notes, timeline, _ = parse_inote("{48}3,,2,,1,,8,,7,E", 120)
+        chart = Chart(level=12, designer="Tester", notes=notes, bpm_timeline=timeline)
+        events = visualize.compute_rhythm_events(chart)
+
+        self.assertTrue(events[0]['is_sweep_start'])
+        self.assertEqual(
+            [event['notes'][0].button for event in events],
+            [3, 2, 1, 8, 7],
+        )
+
+    def test_sweep_rejects_slower_two_note_and_chord_staircases(self):
+        cases = (
+            "{8}1,2,3,4,5,E",
+            "{16}1,2,3,4,5,E",
+            "{24}1,2,E",
+            "{24}1/5,2/6,3/7,4/8,5/1,E",
+        )
+        for inote in cases:
+            with self.subTest(inote=inote):
+                notes, timeline, _ = parse_inote(inote, 120)
+                chart = Chart(level=12, designer="Tester", notes=notes,
+                              bpm_timeline=timeline)
+                events = visualize.compute_rhythm_events(chart)
+                self.assertFalse(any(event['is_sweep_start'] for event in events))
+
+    def test_double_break_head_forms_a_sweep_and_break_color_has_priority(self):
+        notes, timeline, _ = parse_inote("{24}1/5b,6,7,E", 120)
+        chart = Chart(level=12, designer="Tester", notes=notes, bpm_timeline=timeline)
+        events = visualize.compute_rhythm_events(chart)
+
+        self.assertTrue(events[0]['is_sweep_start'])
+        primitives, _ = visualize.build_primitives(events, 4, 1, 120, chart)
+        rings = [primitive for primitive in primitives if primitive[0] == 'ring']
+        self.assertEqual(rings[0][4], visualize.BREAK_RING_COLOR)
+        self.assertNotEqual(rings[0][4], visualize.SWEEP_RING_COLOR)
+
+    def test_reversing_sweep_uses_the_turning_note_as_the_next_start(self):
+        notes, timeline, _ = parse_inote("{24}1,2,3,4,5,4,3,2,1,E", 120)
+        chart = Chart(level=12, designer="Tester", notes=notes, bpm_timeline=timeline)
+        events = visualize.compute_rhythm_events(chart)
+
+        self.assertEqual(
+            [index for index, event in enumerate(events) if event['is_sweep_start']],
+            [0, 4],
+        )
 
     def test_protected_touch_and_break_note_rings(self):
         chart = Chart(level=12, designer="Tester", bpm_timeline=[(0.0, 120.0)])

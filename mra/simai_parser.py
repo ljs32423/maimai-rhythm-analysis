@@ -50,6 +50,7 @@ class NoteType:
     TOUCH = "touch"          # 触摸 (屏幕传感器)
     TOUCH_HOLD = "touch_hold"  # 触摸长按
     FIREWORK = "firework"    # 触摸烟花 (仅作兼容, 实际用 extra['firework'])
+    SWEEP_MARKER = "sweep_marker"  # maidata_sweep.txt 人工扫键头标记
 
 
 # --- 滑条操作符集合 ---
@@ -437,11 +438,19 @@ def parse_one(text: str, pos: int, cur: float, bpm: float) -> Tuple[int, List[No
     """
     解析单个音符 token (无 / 分隔)。
     根据首字符分派:
+      S          → 人工扫键头标记
       C/B/A/D/E → Touch 触摸传感器
       1-8       → 按钮音符 (Tap/Hold/Break/Ex/Slide)
     """
     if pos >= len(text):
         return (pos, [])
+
+    # maidata_sweep.txt 扩展标记。作为 `/S` 放在一个音符组内，
+    # 只携带时间点，不参与普通谱面音符统计或绘制。
+    if text[pos] == 'S':
+        following = text[pos + 1] if pos + 1 < len(text) else ''
+        if not following or following in ',/ \t':
+            return (pos + 1, [Note(NoteType.SWEEP_MARKER, 0, cur)])
 
     # TOUCH 传感器: C / Cf / Ch / Chf / Bn / An / Dn / En (+ 可选 f/h)
     # E 特殊: E 后必须是数字或 h/f 才是 TOUCH，否则作为谱面结束

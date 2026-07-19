@@ -77,6 +77,14 @@ class ParserTests(unittest.TestCase):
         self.assertEqual(notes[0].note_type, NoteType.BREAK)
         self.assertTrue(notes[0].is_ex)
 
+    def test_sweep_markers_keep_group_timing(self):
+        notes, _, _ = parse_inote("{24}1/S,2/S,E", 120)
+        markers = [note for note in notes if note.note_type == NoteType.SWEEP_MARKER]
+
+        self.assertEqual(len(markers), 2)
+        self.assertAlmostEqual(markers[0].time_sec, 0.0)
+        self.assertAlmostEqual(markers[1].time_sec, 1 / 12)
+
     def test_break_hold_keeps_break_flag_before_or_after_hold_marker(self):
         notes, _, _ = parse_inote("1bh[4:1],2hb[4:1],E", 120)
 

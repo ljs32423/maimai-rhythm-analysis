@@ -6,6 +6,7 @@ from unittest import mock
 
 from mra import desktop_backend
 from mra.export_player import SCHEMA_VERSION, export_player
+from mra.visualize import SWEEP_RING_COLOR
 
 
 MAIDATA = """&title=播放器 测试
@@ -72,6 +73,29 @@ class PlayerExportTests(unittest.TestCase):
             export_player(song, 5)
             manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
             self.assertEqual(manifest["song"]["artist"], "Changed")
+
+    def test_sweep_marker_change_invalidates_scene_cache(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            song = self.make_song(Path(tmp))
+            manifest_path = export_player(song, 5)
+            first_manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+            first_hash = first_manifest["input_fingerprints"]["sweep_maidata_sha256"]
+
+            sweep_maidata = song / "maidata_sweep.txt"
+            sweep_maidata.write_text(
+                sweep_maidata.read_text(encoding="utf-8").replace("1,A1", "1/S,A1"),
+                encoding="utf-8",
+            )
+            export_player(song, 5)
+            second_manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+            second_hash = second_manifest["input_fingerprints"]["sweep_maidata_sha256"]
+            scene = json.loads((manifest_path.parent / "scene.json").read_text(encoding="utf-8"))
+
+            self.assertNotEqual(second_hash, first_hash)
+            self.assertTrue(any(
+                primitive["type"] == "ring" and primitive["stroke"] == SWEEP_RING_COLOR
+                for primitive in scene["primitives"]
+            ))
 
     def test_backend_export_stdout_is_json_lines_only(self):
         with tempfile.TemporaryDirectory() as tmp:
