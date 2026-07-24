@@ -1,3 +1,4 @@
+import json
 import os
 import sys
 import tempfile
@@ -8,7 +9,9 @@ from unittest import mock
 import mra.align_audio as align_audio
 import mra.make_html as make_html
 import numpy as np
+from PIL import Image
 import mra.render_preview as render_preview
+import mra.render_strip_video as render_strip_video
 import mra.run_all as run_all
 import mra.visualize as visualize
 from mra.difficulty import (analysis_html_path, difficulty_file_stem, difficulty_name,
@@ -179,17 +182,23 @@ class WorkflowTests(unittest.TestCase):
             source = song / "pv.mp4"
             source.write_bytes(b"source")
 
-            with mock.patch.object(render_preview.subprocess, "run") as run, \
-                 mock.patch.object(render_preview, "ENABLE_PV_PLAYBACK", True):
+            commands = []
+
+            def run_with_fallback(factory, **kwargs):
+                commands.append(factory("libx264"))
+                return mock.Mock(returncode=0), "libx264"
+
+            with mock.patch.object(
+                render_preview, "run_with_fallback", side_effect=run_with_fallback,
+            ) as run, mock.patch.object(render_preview, "ENABLE_PV_PLAYBACK", True):
                 output = render_preview.prepare_recording_assets("ffmpeg", song, work)
 
             self.assertEqual(output, work / "pv.mp4")
             self.assertEqual(source.read_bytes(), b"source")
-            command = run.call_args.args[0]
+            command = commands[0]
             self.assertIn("baseline", command)
             self.assertIn("setpts=PTS-STARTPTS,fps=60", command)
             self.assertEqual(run.call_args.kwargs["cwd"], work)
-            self.assertTrue(run.call_args.kwargs["check"])
 
     def test_recording_closes_majdata_explorer_window_after_success(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -634,8 +643,12 @@ class WorkflowTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             (root / "maidata.txt").write_text(MAIDATA_WITH_REMASTER, encoding="utf-8")
-            for suffix in ("_rhythm.svg", "_strip.svg", "_rhythm.png", "_strip_seg_000.svg"):
+            for suffix in ("_rhythm.svg", "_strip.svg", "_rhythm.png"):
                 (root / f"ReMASTER{suffix}").touch()
+            segment_dir = root / "outputs" / "ReMASTER" / "strip" / "segments"
+            segment_dir.mkdir(parents=True, exist_ok=True)
+            for index in range(4):
+                (segment_dir / f"strip_seg_{index:03d}.svg").touch()
 
             with mock.patch.object(visualize, "render_strip_svg") as svg_render, \
                  mock.patch.object(visualize, "render_strip_png") as png_render, \
@@ -657,11 +670,14 @@ class WorkflowTests(unittest.TestCase):
             (root / "ReMASTER_strip.svg").write_text(
                 '<svg width="640" height="66"></svg>', encoding="utf-8"
             )
+            strip_video = render_strip_video.strip_video_path(root, 6)
+            strip_video.parent.mkdir(parents=True, exist_ok=True)
+            strip_video.write_bytes(b"video")
             output = make_html.generate_html(str(root), "test", diff_id=6)
             self.assertEqual(Path(output), analysis_html_path(root, 6))
             html = Path(output).read_text(encoding="utf-8")
             self.assertIn('data="../../../ReMASTER_strip.svg"', html)
-            self.assertNotIn('data="Re:MASTER_strip.svg"', html)
+            self.assertNotIn('<video class="strip-video"', html)
             self.assertIn('class="play-marker"', html)
             self.assertNotIn('.play-marker::before', html)
             self.assertNotIn('class="right-pentagon"', html)
@@ -689,7 +705,9 @@ class WorkflowTests(unittest.TestCase):
             self.assertIn('id="delaySlider" min="-1000" max="1000" step="1" value="0" disabled', html)
             self.assertIn('id="delayInput" min="-1000" max="1000" step="1" value="0"', html)
             self.assertIn('微调延迟', html)
+            self.assertIn('class="virtual-strip"', html)
             self.assertIn('class="scrolling-stage"', html)
+            self.assertIn('will-change: transform;', html)
             self.assertIn('.seek-wrap:hover input[type=range],', html)
             self.assertIn('.speed-wrap:hover input[type=range] {', html)
             self.assertIn(".seek-wrap.seeking input[type=range] {", html)
@@ -697,33 +715,39 @@ class WorkflowTests(unittest.TestCase):
             self.assertIn("speedSlider.addEventListener('input'", html)
             self.assertIn('function setPlaybackRate(value)', html)
             self.assertIn('pv.playbackRate = rate;', html)
+            self.assertIn('pvSvg.playbackRate = rate;', html)
             self.assertIn("speedInput.addEventListener('input'", html)
             self.assertIn("seekSlider.addEventListener('pointermove'", html)
             self.assertIn("pv.addEventListener('timeupdate', () => {", html)
-            self.assertIn("pv.currentTime = Math.max(0, pv.currentTime - 1);", html)
-            self.assertIn("pv.currentTime = Math.min(duration, pv.currentTime + 1);", html)
-            self.assertIn('const scrollDistance = state.beat * PX_PER_BEAT', html)
-            self.assertIn('const displayScrollDistance = Math.round(scrollDistance * 100) / 100;', html)
-            self.assertIn("svgScroll.style.transform = `translate3d(${", html)
+            self.assertIn('function stripTimeForVideo(videoT)', html)
+            self.assertIn('videoT - VIDEO_OFFSET - delayMs / 1000', html)
+            self.assertIn('function frameSvg(timestamp)', html)
+            self.assertIn('rafSvg = requestAnimationFrame(frameSvg);', html)
+            self.assertIn('function prepareSegmentsSvg()', html)
+            self.assertIn("image.decoding = 'sync';", html)
+            self.assertIn('virtualStripSvg.replaceChildren(fragment);', html)
+            self.assertIn("document.body.dataset.rendererMode = 'segmented-svg';", html)
             self.assertIn('class="virtual-strip"', html)
-            self.assertIn('id="virtualStrip"', html)
-            self.assertIn('const SEGMENTS = [];', html)
-            self.assertIn('const USE_SEGMENTS = SEGMENTS.length > 0;', html)
-            self.assertIn('function updateVisibleSegments(scrollDistance)', html)
-            self.assertIn('svgScroll.hidden = true;', html)
+            self.assertNotIn('id="rhythmWebgl"', html)
             self.assertIn('function findTimingSegment(chartT)', html)
             self.assertIn('let timingIndex = 0;', html)
             self.assertIn('while (lo <= hi)', html)
             self.assertIn('const START_DISPLAY_BEAT = 0;', html)
             self.assertIn('return { beat: START_DISPLAY_BEAT, bpm: timings[0].bpm };', html)
             self.assertIn('window.__RHYTHM_ANALYSIS__', html)
-            self.assertIn('<video id="pv" preload="metadata">', html)
+            self.assertIn('<video id="pv" preload="auto">', html)
+            self.assertIn('id="localFileWarning" hidden', html)
+            self.assertIn("window.location.protocol === 'file:'", html)
+            self.assertIn('打开分析页面.cmd', html)
             self.assertIn('src="../video/preview.mp4"', html)
-            self.assertIn(':root { --rhythm-height: 108px;', html)
+            self.assertIn('--rhythm-height: 108px;', html)
             self.assertIn('--marker-size: 52px;', html)
             self.assertIn('--marker-top: 15.4px;', html)
-            self.assertIn('const VIDEO_OFFSET = 0.0;', html)
-            self.assertIn('const chartT = videoT - VIDEO_OFFSET - delayMs / 1000;', html)
+            self.assertIn('const VIDEO_OFFSET_SVG = 0.0;', html)
+            self.assertIn(
+                'const chartTime = videoTime - VIDEO_OFFSET_SVG - delaySvgMs / 1000;',
+                html,
+            )
             self.assertNotIn('fetch(OFFSET_FILE', html)
             self.assertLess(html.index('class="controls"'), html.index('class="rhythm-container"'))
             self.assertIn('grid-template-columns: minmax(0, 1fr) clamp(430px, 34vw, 820px);', html)
@@ -735,10 +759,10 @@ class WorkflowTests(unittest.TestCase):
             self.assertIn('class="video-pane"', html)
             self.assertIn('class="video-crop"', html)
             self.assertIn('class="info-pane"', html)
-            self.assertIn('class="scrolling-svg"', html)
+            self.assertNotIn('<video class="strip-video"', html)
+            self.assertIn('id="virtualStrip"', html)
             self.assertIn('id="svgScroll"', html)
             self.assertIn('data="../../../ReMASTER_strip.svg"', html)
-            self.assertIn('contain: layout paint style;', html)
             self.assertIn('backface-visibility: hidden;', html)
             self.assertIn('appearance: none; height: 2px; border-radius: 999px;', html)
             self.assertIn('background: rgba(20,22,34,0.42);', html)
@@ -761,7 +785,7 @@ class WorkflowTests(unittest.TestCase):
             self.assertNotIn('class="video-watermark-mask"', html)
             self.assertNotIn('transform: scale(1.16) translateX(-7%);', html)
             self.assertNotIn('translateX(-4.5%)', html)
-            self.assertIn('mask-image: none;', html)
+            self.assertIn('image-rendering: auto;', html)
             self.assertIn('border-top: none;', html)
             self.assertIn('box-shadow: none;', html)
             self.assertIn('display: none;', html)
@@ -798,8 +822,8 @@ class WorkflowTests(unittest.TestCase):
             self.assertIn("delaySlider.addEventListener('input'", html)
             self.assertIn("delayInput.addEventListener('input'", html)
             self.assertIn('updateDelayUi(0);', html)
-            self.assertIn('delaySlider.disabled = !available;', html)
-            self.assertIn('delayInput.disabled = !available;', html)
+            self.assertIn('delaySlider.disabled = !videoReady;', html)
+            self.assertIn('delayInput.disabled = !videoReady;', html)
             self.assertIn('--delay-fill-start: 50%; --delay-fill-end: 50%;', html)
             self.assertIn('rgba(77,208,225,0.14)', html)
 
@@ -820,7 +844,7 @@ class WorkflowTests(unittest.TestCase):
             self.assertIn('const MEASURE_BOUNDARIES = [4.0];', html)
             self.assertIn('<strong id="measureNumber">1</strong><em>/ 1</em>', html)
 
-    def test_html_uses_svg_segments_when_available(self):
+    def test_html_rebuilds_and_uses_complete_svg_segments(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             (root / "maidata.txt").write_text(MAIDATA_WITH_REMASTER, encoding="utf-8")
@@ -830,19 +854,75 @@ class WorkflowTests(unittest.TestCase):
             (root / "ReMASTER_strip_seg_000.svg").write_text(
                 '<svg width="7232" height="60"></svg>', encoding="utf-8"
             )
+            strip_video = render_strip_video.strip_video_path(root, 6)
+            strip_video.parent.mkdir(parents=True, exist_ok=True)
+            strip_video.write_bytes(b"video")
             output = make_html.generate_html(str(root), "test", diff_id=6)
             html = Path(output).read_text(encoding="utf-8")
 
-            self.assertIn('"src": "../strip/segments/strip_seg_000.svg"', html)
-            self.assertIn('"x": 0', html)
-            self.assertIn("const image = document.createElement('img');", html)
-            self.assertIn('virtualStrip.appendChild(image);', html)
-            self.assertIn('if (USE_SEGMENTS) {', html)
-            self.assertIn('id="svgScroll" type="image/svg+xml" width="8000" height="60" hidden', html)
-            self.assertNotIn('id="svgScroll" data="../../../ReMASTER_strip.svg"', html)
+            self.assertIn(
+                '"src": "../strip/segments/strip_seg_000.svg"',
+                html,
+            )
+            self.assertIn('id="virtualStrip"', html)
+            self.assertNotIn('<video class="strip-video"', html)
             segment_dir = root / "outputs" / "ReMASTER" / "strip" / "segments"
-            self.assertTrue((segment_dir / "strip_seg_000.svg").exists())
-            self.assertTrue((segment_dir / "strip_seg_001.svg").exists())
+            self.assertTrue(segment_dir.exists())
+            self.assertEqual(
+                len(list(segment_dir.glob("strip_seg_*.svg"))),
+                5,
+            )
+            html_dir = root / "outputs" / "ReMASTER" / "html"
+            self.assertTrue((html_dir / "打开分析页面.cmd").exists())
+            self.assertTrue((html_dir / "_open_analysis_server.py").exists())
+            self.assertIn(
+                'ThreadingHTTPServer(("127.0.0.1", 0), AnalysisHandler)',
+                (html_dir / "_open_analysis_server.py").read_text(encoding="utf-8"),
+            )
+            self.assertIn(
+                'self.send_header("Content-Range"',
+                (html_dir / "_open_analysis_server.py").read_text(encoding="utf-8"),
+            )
+
+    def test_html_ignores_obsolete_strip_video_metadata(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "maidata.txt").write_text(
+                MAIDATA_WITH_REMASTER,
+                encoding="utf-8",
+            )
+            (root / "ReMASTER_strip.svg").write_text(
+                '<svg width="8000" height="60"></svg>',
+                encoding="utf-8",
+            )
+            video = (
+                root / "outputs" / "ReMASTER" / "strip"
+                / "strip_video.hires.mp4"
+            )
+            video.parent.mkdir(parents=True, exist_ok=True)
+            video.write_bytes(b"video")
+            render_strip_video.strip_video_metadata_path(root, 6).write_text(
+                json.dumps({
+                    "filename": video.name,
+                    "width": 4096,
+                    "height": 216,
+                    "logical_width": 2048,
+                    "logical_height": 108,
+                    "marker_x": 344.064,
+                }),
+                encoding="utf-8",
+            )
+
+            output = make_html.generate_html(str(root), "test", diff_id=6)
+            html = Path(output).read_text(encoding="utf-8")
+
+            self.assertNotIn('<video class="strip-video"', html)
+            self.assertNotIn('--strip-video-width:', html)
+            self.assertIn('id="virtualStrip"', html)
+            self.assertIn(
+                '"src": "../strip/segments/strip_seg_000.svg"',
+                html,
+            )
 
     def test_html_regenerates_when_offset_is_newer_than_output(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -863,7 +943,10 @@ class WorkflowTests(unittest.TestCase):
             root = Path(tmp)
             html_path = root / "MASTER_analysis.html"
             offset_path = root / "MASTER_offset.txt"
-            html_path.write_text("new", encoding="utf-8")
+            html_path.write_text(
+                f'<body data-renderer-version="{make_html.PLAYER_RENDERER_VERSION}">',
+                encoding="utf-8",
+            )
             offset_path.write_text("5.0000\n", encoding="utf-8")
             old_time = 1000
             new_time = 2000
@@ -879,30 +962,121 @@ class WorkflowTests(unittest.TestCase):
             (root / "ReMASTER_strip.svg").write_text(
                 '<svg width="640" height="66"></svg>', encoding="utf-8"
             )
+            strip_video = render_strip_video.strip_video_path(root, 6)
+            strip_video.parent.mkdir(parents=True, exist_ok=True)
+            strip_video.write_bytes(b"video")
             output = make_html.generate_html(str(root), "test", diff_id=6)
             html = Path(output).read_text(encoding="utf-8")
 
-            # marker position is cached instead of measured every frame
-            self.assertIn('if (cachedPlayPositionPx === null)', html)
-            # transform / bpm / time / seek progress are dirty-checked
-            self.assertIn('if (lastScrollDistance === null || Math.abs(displayScrollDistance - lastScrollDistance) >= 0.01)', html)
-            self.assertIn('if (state.bpm !== lastBpm)', html)
-            self.assertIn('if (timeText !== lastTimeText)', html)
-            self.assertIn('if (percent !== lastSeekPercent)', html)
-            self.assertIn('const shouldUpdateProgress = force || isSeeking || lastSeekUiTime === null || Math.abs(current - lastSeekUiTime) >= 0.1;', html)
-            self.assertIn('const state = renderFrame(videoT);', html)
-            self.assertIn('function updateStatusUi(videoT, state, force = false)', html)
-            self.assertIn('const STATUS_UI_INTERVAL_MS = 100;', html)
-            self.assertIn('if (timestamp - lastStatusUiUpdate >= STATUS_UI_INTERVAL_MS)', html)
-            self.assertIn('function getPlaybackTime()', html)
-            self.assertIn('const image = document.createElement(\'img\');', html)
-            self.assertIn('if (firstIndex === lastVisibleFirstIndex && lastIndex === lastVisibleLastIndex) return;', html)
-            # seek tip is driven by the drag itself, not every animation frame
-            self.assertIn('updateSeekTip(parseFloat(e.target.value) || 0)', html)
-            # resize is coalesced into a single animation frame
-            self.assertIn('cancelAnimationFrame(resizeRafId)', html)
-            # pointer move reuses a cached slider rect
-            self.assertIn('seekRectCache', html)
+            # All segments are decoded before playback and remain mounted.
+            self.assertIn('function prepareSegmentsSvg()', html)
+            self.assertIn('virtualStripSvg.replaceChildren(fragment);', html)
+            self.assertIn("image.loading = 'eager';", html)
+            self.assertIn("image.decoding = 'sync';", html)
+            self.assertIn('Promise.all(decodes)', html)
+            self.assertNotIn('function updateVisibleSegmentsSvg', html)
+
+            # The hot path performs one compositor transform per display frame.
+            self.assertIn('function frameSvg(timestamp)', html)
+            self.assertIn('rafSvg = requestAnimationFrame(frameSvg);', html)
+            self.assertIn(
+                "const transform = 'translate3d(' + (-distance) + 'px,0,0)';",
+                html,
+            )
+            self.assertIn('virtualStripSvg.style.transform = transform;', html)
+            self.assertIn('const STATUS_INTERVAL_SVG_MS = 100;', html)
+            self.assertIn('function playbackTimeSvg(timestamp = performance.now())', html)
+            self.assertNotIn('PLAYBACK_CLOCK_SYNC_INTERVAL_MS', html.split(
+                '<script>\n// ===== 高性能分段 SVG 播放器 =====', 1
+            )[1])
+            self.assertIn('seekRectSvg', html)
+
+    def test_strip_video_timeline_uses_chart_time_zero_and_120_fps(self):
+        notes, timeline, _ = parse_inote("{4},,,,1,2,E", 120)
+        chart = Chart(level=12, designer="Tester", notes=notes, bpm_timeline=timeline)
+
+        times, positions = render_strip_video._build_scroll_timeline(chart)
+        self.assertEqual(times[0], 0.0)
+        self.assertAlmostEqual(
+            positions[0],
+            visualize.PAD_X
+            - render_strip_video.STRIP_VIDEO_MARKER_X
+            / render_strip_video.SVG_SCALE,
+        )
+        frames = render_strip_video._frame_positions(
+            [0.0, 1.0],
+            [0.0, 100.0],
+            fps=4,
+        )
+        self.assertEqual(frames, [0.0, 25.0, 50.0, 75.0])
+        self.assertEqual(render_strip_video.STRIP_VIDEO_FPS, 120)
+
+    def test_strip_video_cache_tracks_manual_sweep_edits(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "maidata.txt").write_text(MAIDATA_WITH_REMASTER, encoding="utf-8")
+            (root / "maidata_sweep.txt").write_text(
+                MAIDATA_WITH_REMASTER,
+                encoding="utf-8",
+            )
+            fingerprint = render_strip_video._source_fingerprint(root, 6)
+            video = (
+                root / "outputs" / "ReMASTER" / "strip"
+                / "strip_video.test.mp4"
+            )
+            video.parent.mkdir(parents=True, exist_ok=True)
+            video.write_bytes(b"video")
+            metadata = {
+                "version": render_strip_video.STRIP_VIDEO_FORMAT_VERSION,
+                "fingerprint": fingerprint,
+                "fps": render_strip_video.STRIP_VIDEO_FPS,
+                "width": render_strip_video.STRIP_VIDEO_WIDTH,
+                "height": render_strip_video.STRIP_VIDEO_HEIGHT,
+                "logical_width": render_strip_video.STRIP_VIDEO_LOGICAL_WIDTH,
+                "logical_height": render_strip_video.STRIP_VIDEO_LOGICAL_HEIGHT,
+                "supersample": render_strip_video.STRIP_VIDEO_SUPERSAMPLE,
+                "marker_x": render_strip_video.STRIP_VIDEO_MARKER_X,
+                "filename": video.name,
+            }
+            render_strip_video.strip_video_metadata_path(root, 6).write_text(
+                json.dumps(metadata),
+                encoding="utf-8",
+            )
+            self.assertEqual(render_strip_video.strip_video_path(root, 6), video)
+            self.assertTrue(render_strip_video.strip_video_is_current(root, 6))
+
+            (root / "maidata_sweep.txt").write_text(
+                MAIDATA_WITH_REMASTER + "\n",
+                encoding="utf-8",
+            )
+            self.assertFalse(render_strip_video.strip_video_is_current(root, 6))
+
+    def test_compact_strip_png_can_render_at_video_scale(self):
+        notes, timeline, _ = parse_inote("{16}1,2,3,4,E", 120)
+        chart = Chart(level=12, designer="Tester", notes=notes, bpm_timeline=timeline)
+        events = visualize.compute_rhythm_events(chart)
+        total_beats = 1
+        with tempfile.TemporaryDirectory() as tmp:
+            output = Path(tmp) / "strip.png"
+            visualize.render_compact_strip_png(
+                events,
+                total_beats,
+                120,
+                chart,
+                output,
+                raster_scale=render_strip_video.STRIP_VIDEO_RASTER_SCALE,
+            )
+            with Image.open(output) as image:
+                self.assertEqual(
+                    image.size,
+                    (
+                        round(
+                            visualize.row_width_px(total_beats)
+                            * render_strip_video.STRIP_VIDEO_RASTER_SCALE
+                        ),
+                        render_strip_video.STRIP_VIDEO_HEIGHT,
+                    ),
+                )
 
     def test_smaller_sixteenth_notes_remain_visually_tangent(self):
         visible_diameter = visualize.NOTE_OUTER_DIAMETER
@@ -1162,6 +1336,7 @@ class WorkflowTests(unittest.TestCase):
         self.assertEqual(len(run_step.call_args_list), 6)
         self.assertEqual(run_step.call_args_list[1].args[2], ['-d', 'song', '-diff', '5'])
         self.assertEqual(run_step.call_args_list[2].args[2], ['-d', 'song', '-diff', '5'])
+        self.assertEqual(run_step.call_args_list[3].args[2], ['-d', 'song', '-diff', '5'])
         self.assertEqual(run_step.call_args_list[4].args[2], ['-d', 'song', '-diff', '5', '-offset', '0.0'])
 
     def test_run_all_force_preserves_meter_video_and_audio_alignment(self):

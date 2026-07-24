@@ -1,7 +1,8 @@
 [CmdletBinding()]
 param(
-    [string]$Version = "v0.2.0",
-    [string]$OutputDirectory = ""
+    [string]$Version = "v0.3.0",
+    [string]$OutputDirectory = "",
+    [switch]$SkipRuntimeBuild
 )
 
 $ErrorActionPreference = "Stop"
@@ -20,6 +21,8 @@ $stageRoot = Join-Path $releaseRoot ".staging"
 $packageRoot = Join-Path $stageRoot $packageName
 $appRoot = Join-Path $packageRoot "app"
 $runtimeRoot = Join-Path $packageRoot "required-programs\.tools"
+$pythonVersion = "3.12.10"
+$pythonSource = Join-Path $project ".tools\python\$pythonVersion"
 $archive = Join-Path $releaseRoot "$packageName.zip"
 $checksum = "$archive.sha256"
 
@@ -38,6 +41,15 @@ function Copy-Runtime([string]$RelativePath) {
 }
 
 New-Item -ItemType Directory -Path $releaseRoot -Force | Out-Null
+if (-not (Test-Path -LiteralPath (Join-Path $pythonSource "python.exe") -PathType Leaf)) {
+    if ($SkipRuntimeBuild) {
+        throw "缺少嵌入式 Python 运行时: $pythonSource"
+    }
+    & (Join-Path $PSScriptRoot "build_runtime.ps1") -PythonVersion $pythonVersion
+    if ($LASTEXITCODE -ne 0) {
+        throw "构建嵌入式 Python 运行时失败，退出码 $LASTEXITCODE"
+    }
+}
 if (Test-Path -LiteralPath $stageRoot) {
     $resolvedStage = [System.IO.Path]::GetFullPath($stageRoot)
     if (-not $resolvedStage.StartsWith($releaseRoot + [System.IO.Path]::DirectorySeparatorChar,
@@ -57,12 +69,9 @@ $rootFiles = @(
     "README.md",
     "THIRD_PARTY_NOTICES.md",
     "requirements.txt",
-    "align_audio.py",
-    "init_meter.py",
-    "make_html.py",
-    "render_preview.py",
-    "run_all.py",
-    "visualize.py"
+    "requirements-runtime.txt",
+    "config.example.json",
+    "web_app.py"
 )
 foreach ($file in $rootFiles) {
     Copy-Item -LiteralPath (Join-Path $project $file) -Destination $appRoot -Force
@@ -72,11 +81,13 @@ foreach ($file in $rootFiles) {
 Copy-Runtime "majdataviewx\6.0.0"
 Copy-Runtime "ffprobe\6.1.1"
 Copy-Runtime "majdata_bridge"
+Copy-Runtime "python\$pythonVersion"
 
 $requiredFiles = @(
     (Join-Path $runtimeRoot "majdataviewx\6.0.0\MajdataView.exe"),
     (Join-Path $runtimeRoot "ffprobe\6.1.1\ffprobe.exe"),
-    (Join-Path $runtimeRoot "majdata_bridge\MajdataBridge.exe")
+    (Join-Path $runtimeRoot "majdata_bridge\MajdataBridge.exe"),
+    (Join-Path $runtimeRoot "python\$pythonVersion\python.exe")
 )
 foreach ($file in $requiredFiles) {
     if (-not (Test-Path -LiteralPath $file -PathType Leaf)) {
@@ -88,13 +99,22 @@ $runAll = @'
 @echo off
 setlocal
 cd /d "%~dp0"
-where python >nul 2>nul
+set "MRA_APP_ROOT=%~dp0"
+"%~dp0..\required-programs\.tools\python\3.12.10\python.exe" -m mra.run_all %*
+exit /b %errorlevel%
+'@
+
+$startWeb = @'
+@echo off
+setlocal
+cd /d "%~dp0"
+set "MRA_APP_ROOT=%~dp0"
+"%~dp0..\required-programs\.tools\python\3.12.10\python.exe" -m mra.web_app
 if errorlevel 1 (
-    echo Python was not found. Install Python 3.11 or newer first.
+    echo.
+    echo Web application stopped with an error.
     pause
-    exit /b 1
 )
-python -m mra.run_all %*
 exit /b %errorlevel%
 '@
 
@@ -105,8 +125,14 @@ $songsReadme = @'
 '@
 
 Set-Content -LiteralPath (Join-Path $appRoot "run_all.bat") -Value $runAll -Encoding ASCII
+Set-Content -LiteralPath (Join-Path $appRoot "启动节奏分析.cmd") -Value $startWeb -Encoding UTF8
 Set-Content -LiteralPath (Join-Path $appRoot "songs\把歌曲放到这里.txt") -Value $songsReadme -Encoding UTF8
 Set-Content -LiteralPath (Join-Path $packageRoot "VERSION") -Value $Version -Encoding ASCII
+
+& (Join-Path $PSScriptRoot "smoke_test_release.ps1") -PackageRoot $packageRoot
+if ($LASTEXITCODE -ne 0) {
+    throw "发行包冒烟测试失败，退出码 $LASTEXITCODE"
+}
 
 $tar = Get-Command tar.exe -ErrorAction Stop
 & $tar.Source -a -c -f $archive -C $stageRoot $packageName

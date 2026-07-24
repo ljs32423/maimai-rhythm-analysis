@@ -31,8 +31,11 @@ from scipy.io import wavfile
 from scipy.io.wavfile import WavFileWarning
 from scipy.signal import resample_poly
 
+from .config import load_config
 from .difficulty import (default_target_difficulties, difficulty_name,
                          legacy_difficulty_path, preview_video_path)
+from .ffmpeg_capabilities import (detect_capabilities, encoder_args,
+                                  find_binary, run_with_fallback)
 from .simai_parser import parse_maidata
 from .song_library import PROJECT_ROOT, discover_song_folders
 
@@ -52,13 +55,13 @@ DEFAULT_TOUCH_SPEED = 7.5
 DEFAULT_BACKGROUND_COVER = 0.5
 ENABLE_PV_PLAYBACK = False
 
-# 录制分辨率选项（宽, 高），直接修改下面两个常量即可切换：
-# 1920, 1080  -> Full HD，速度最快
-# 2560, 1440  -> 2K，画质与速度平衡
-# 3840, 2160  -> 4K，最高画质（当前默认）
-RECORD_WIDTH = 2560
-RECORD_HEIGHT = 1440
-RECORD_FPS = 60
+APP_CONFIG, CONFIG_WARNINGS = load_config()
+RECORDING_CONFIG = APP_CONFIG["recording"]
+RECORD_WIDTH = int(RECORDING_CONFIG["width"])
+RECORD_HEIGHT = int(RECORDING_CONFIG["height"])
+RECORD_FPS = int(RECORDING_CONFIG["fps"])
+RECORD_QUALITY = str(RECORDING_CONFIG["quality"])
+ENCODER_PREFERENCE = str(APP_CONFIG["encoder"])
 
 # 录制后输出给前端的实际预览视频裁剪。
 # MajdataViewX 的 16:9 画面左右有参数区；取中心正方形能完整保留圆形游戏界面。
@@ -70,13 +73,20 @@ ENABLE_KEY_SOUNDS = True
 KEY_SOUND_VOLUME = 0.7
 RECORDING_LEAD_IN_SECONDS = 5.0
 
-RECORDER_FFMPEG_ARGUMENTS = (
-    f'-hide_banner -y -f rawvideo -vcodec rawvideo -pix_fmt rgba '
-    f'-s "{{0}}x{{1}}" -r {RECORD_FPS} -i \\\\.\\pipe\\majdataRec -i "{{2}}" '
-    f'-vf "vflip" -c:v libx264 -preset ultrafast -tune zerolatency '
-    f'-crf 18 -pix_fmt yuv420p -r {RECORD_FPS} -fps_mode cfr -t "{{4:0.0000}}" '
-    f'-b:a 320k -c:a aac -movflags +faststart "{{3}}"'
-)
+def recorder_ffmpeg_arguments(codec: str = "libx264",
+                              quality: str = RECORD_QUALITY) -> str:
+    video_args = " ".join(encoder_args(codec, quality, purpose="recording"))
+    return (
+        f'-hide_banner -y -f rawvideo -vcodec rawvideo -pix_fmt rgba '
+        f'-s "{{0}}x{{1}}" -r {RECORD_FPS} -i \\\\.\\pipe\\majdataRec -i "{{2}}" '
+        f'-vf "vflip" {video_args} '
+        f'-pix_fmt yuv420p -r {RECORD_FPS} -fps_mode cfr -t "{{4:0.0000}}" '
+        f'-b:a 320k -c:a aac -movflags +faststart "{{3}}"'
+    )
+
+
+# 保留公开常量供旧调用方读取；实际录制会在 configure_recorder() 中按机器能力生成。
+RECORDER_FFMPEG_ARGUMENTS = recorder_ffmpeg_arguments()
 
 
 def tools_roots() -> list[Path]:
@@ -127,15 +137,29 @@ def find_executable(name: str, majdata_home: Path | None = None):
 
 
 def configure_recorder(majdata_home: Path) -> Path:
-    """Keep MajdataView's bundled FFmpeg recorder at the project settings."""
+    """Write MajdataView's recorder arguments using a verified encoder."""
     arguments_path = (
         majdata_home / "MajdataView_Data" / "StreamingAssets" / "ffarguments.txt"
     )
     if not arguments_path.exists():
         raise FileNotFoundError(f"缺少 MajdataView 录制配置: {arguments_path}")
+    ffmpeg = find_executable("ffmpeg.exe", majdata_home) or find_executable(
+        "ffmpeg", majdata_home,
+    )
+    if not ffmpeg:
+        raise FileNotFoundError("MajdataView 目录中没有可用的 FFmpeg")
+    capabilities = detect_capabilities(
+        ffmpeg=ffmpeg,
+        preference=ENCODER_PREFERENCE,
+    )
+    arguments = recorder_ffmpeg_arguments(capabilities.selected)
     current = arguments_path.read_text(encoding="utf-8").strip()
-    if current != RECORDER_FFMPEG_ARGUMENTS:
-        arguments_path.write_text(RECORDER_FFMPEG_ARGUMENTS + "\n", encoding="utf-8")
+    if current != arguments:
+        arguments_path.write_text(arguments + "\n", encoding="utf-8")
+    print(
+        f"  录制编码器: {capabilities.to_dict()['selected_name']} "
+        f"({capabilities.selected})",
+    )
     return arguments_path
 
 
@@ -372,21 +396,30 @@ def prepare_recording_assets(ffmpeg: str, song_dir: Path, work_dir: Path) -> Pat
         return None
 
     output = work_dir / "pv.mp4"
-    subprocess.run(
-        [
+    def command(codec: str) -> list[str]:
+        profile_args = (
+            ["-profile:v", "baseline", "-level:v", "4.2"]
+            if codec == "libx264" else []
+        )
+        return [
             ffmpeg,
             "-hide_banner", "-loglevel", "error", "-y",
             "-fflags", "+genpts", "-i", str(source_pv),
             "-an", "-vf", f"setpts=PTS-STARTPTS,fps={RECORD_FPS}",
-            "-c:v", "libx264", "-preset", "veryfast",
-            "-profile:v", "baseline", "-level:v", "4.2",
+            *encoder_args(codec, RECORD_QUALITY),
+            *profile_args,
             "-pix_fmt", "yuv420p", "-g", str(RECORD_FPS * 2),
             "-video_track_timescale", str(RECORD_FPS * 1000),
             "-movflags", "+faststart", str(output),
-        ],
+        ]
+
+    _, codec = run_with_fallback(
+        command,
+        ffmpeg=ffmpeg,
+        preference=ENCODER_PREFERENCE,
         cwd=work_dir,
-        check=True,
     )
+    print(f"  PV 转码编码器: {codec}")
     return output
 
 
@@ -692,20 +725,25 @@ def crop_recorded_preview(ffmpeg: str, source: Path, output: Path) -> None:
     # side = min(iw, ih); x/y choose the centered square.
     # For the current 2K recording this is crop=1440:1440:560:0.
     crop_filter = "crop='min(iw,ih)':'min(iw,ih)':'(iw-min(iw,ih))/2':'(ih-min(iw,ih))/2'"
-    subprocess.run(
-        [
+    def command(codec: str) -> list[str]:
+        return [
             ffmpeg,
             "-hide_banner", "-loglevel", "error", "-y",
             "-i", str(source),
             "-vf", crop_filter,
-            "-c:v", "libx264", "-preset", "veryfast",
-            "-crf", "18", "-pix_fmt", "yuv420p",
+            *encoder_args(codec, RECORD_QUALITY),
+            "-pix_fmt", "yuv420p",
             "-c:a", "copy",
             "-movflags", "+faststart",
             str(temp_output),
-        ],
-        check=True,
+        ]
+
+    _, codec = run_with_fallback(
+        command,
+        ffmpeg=ffmpeg,
+        preference=ENCODER_PREFERENCE,
     )
+    print(f"  最终裁切编码器: {codec}")
     temp_output.replace(output)
 
 

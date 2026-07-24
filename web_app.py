@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-"""Shortcut entry for ``python -m mra.run_all``."""
-from mra.run_all import main
+"""Shortcut entry for ``python -m mra.web_app``."""
+from mra.web_app import main
 
 
 if __name__ == "__main__":

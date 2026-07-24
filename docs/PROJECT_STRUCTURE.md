@@ -6,16 +6,17 @@
 
 - `README.md`
 - `requirements.txt`
-- `run_all.py`
-- `visualize.py`
-- `render_preview.py`
-- `align_audio.py`
-- `make_html.py`
+- `requirements-runtime.txt`
+- `config.example.json`
+- `web_app.py`
 - `songs/`
 - `tests/`
 - `docs/`
 - `tools/`
 - `mra/`
+
+根目录只保留 `web_app.py` 作为便捷入口；其他命令行工具统一通过
+`python -m mra.<模块>` 运行。
 
 ## mra/
 
@@ -29,6 +30,11 @@
 - `mra/simai_parser.py`
 - `mra/difficulty.py`
 - `mra/song_library.py`
+- `mra/config.py`
+- `mra/ffmpeg_capabilities.py`
+- `mra/web_jobs.py`
+- `mra/web_app.py`
+- `mra/web/`：本地 Web 应用的 HTML、CSS 和 JavaScript
 
 现在统一使用模块方式运行：
 
@@ -38,6 +44,7 @@ python -m mra.visualize -d "Song Name"
 python -m mra.render_preview -d "Song Name"
 python -m mra.align_audio -d "Song Name"
 python -m mra.make_html -d "Song Name"
+python -m mra.web_app
 ```
 
 ## docs/
@@ -59,6 +66,9 @@ Python 自动化测试。
 ## tools/
 
 - `src/majdata_bridge/`：MajdataBridge 的 C# 源码
+- `build_runtime.ps1`：下载并组装固定版本的嵌入式 Python
+- `build_release.ps1`：打包无需安装 Python 的完整发布包
+- `smoke_test_release.ps1`：检查完整发布包的内置运行环境
 
 ## .tools/
 

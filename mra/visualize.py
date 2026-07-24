@@ -588,7 +588,7 @@ def ensure_sweep_maidata_for_song(song_dir: str | Path,
 # 采用"每拍固定像素"映射，变速不变距。
 PX_PER_BEAT = 108         # 每拍像素宽度 (16分间距=27px，与节奏点外径相切)
 PAD_X = 320               # 左侧额外预留空带，避免前端初始对齐时露出容器黑底
-SEGMENT_BEATS = 64        # 前端 SVG 虚拟化分段长度；每段 16 小节，兼顾清晰度与 DOM 开销
+SEGMENT_BEATS = 16        # 控制单段 GPU 纹理宽度；更多小段换取更稳定的高刷滚动
 NOTE_R = 11.5             # 节奏点填充半径；外环与填充之间保留 1px 黑色间隔
 NOTE_RING_GAP = 1.0       # 节奏点填充与外环之间的黑色间隔
 NOTE_RING_W = 1.0         # 节奏点外环宽度（不影响终点空心圆）
@@ -1206,6 +1206,46 @@ def _draw_prim_mpl(ax, p, yoff):
         fs = 'italic' if style == 'italic' else 'normal'
         ax.text(x, y + yoff, str(txt), color=fill, fontsize=size * 1.1,
                 ha=ha, va='center', fontweight=fw, fontstyle=fs, fontfamily=MPL_TEXT_FONT_FAMILY)
+
+
+def render_compact_strip_png(events, total_beats, bpm, chart, out_path,
+                             meter_map=None, dpi=100, raster_scale=1.0):
+    """将紧凑 strip 渲染为单行 PNG，供预录制 strip 视频使用。
+
+    与 render_strip_svg(compact=True) 输出完全一致的视觉效果，
+    直接通过 matplotlib 绘制，不依赖 cairosvg。
+    """
+    row_beats = int(math.ceil(total_beats))
+    prims, _n_rows = build_primitives(events, row_beats, total_beats, bpm, chart, meter_map)
+    W = row_width_px(row_beats)
+    H = NOTE_AREA_H + LABEL_GAP + LABEL_AREA_H
+    if raster_scale <= 0:
+        raise ValueError("raster_scale must be positive")
+    output_dpi = dpi * raster_scale
+    target_width = int(round(W * raster_scale))
+    target_height = int(round(H * raster_scale))
+    # 先确定最终像素尺寸，再反推英寸大小，避免浮点误差令 matplotlib
+    # 偶尔少输出 1 像素，导致视频编码前还要做一次不必要的缩放。
+    fig_w = target_width / output_dpi
+    fig_h = target_height / output_dpi
+    fig = plt.figure(figsize=(fig_w, fig_h), dpi=output_dpi)
+    ax = fig.add_axes([0, 0, 1, 1])
+    ax.set_xlim(0, W)
+    ax.set_ylim(H, 0)
+    ax.axis('off')
+    fig.patch.set_facecolor('#0a0a14')
+    for p in prims:
+        _draw_prim_mpl(ax, p, 0)
+    out_path = Path(out_path)
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(
+        str(out_path),
+        dpi=output_dpi,
+        facecolor=fig.get_facecolor(),
+        bbox_inches=None,
+    )
+    plt.close(fig)
+    return str(out_path)
 
 
 # ============ 发现歌曲 & 处理 ============

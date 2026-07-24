@@ -14,6 +14,8 @@ release/
 *.npz
 *.zip
 .cache/
+.mra-web-instance.json
+config.json
 
 *_rhythm.png
 *_rhythm.svg

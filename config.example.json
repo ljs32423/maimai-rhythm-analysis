@@ -1,0 +1,16 @@
+{
+  "version": 1,
+  "songs_root": "songs",
+  "encoder": "auto",
+  "recording": {
+    "width": 2560,
+    "height": 1440,
+    "fps": 60,
+    "quality": "high"
+  },
+  "web": {
+    "host": "127.0.0.1",
+    "port": 0,
+    "open_browser": true
+  }
+}

@@ -1,0 +1,114 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Maimai Rhythm Analysis</title>
+  <link rel="stylesheet" href="/static/app.css">
+</head>
+<body>
+  <header>
+    <div>
+      <p class="eyebrow">LOCAL RHYTHM WORKSPACE</p>
+      <h1>Maimai Rhythm Analysis</h1>
+    </div>
+    <div class="system" id="systemStatus">正在检测运行环境…</div>
+  </header>
+
+  <main>
+    <section class="toolbar panel">
+      <input id="searchInput" type="search" placeholder="搜索歌曲或艺术家">
+      <button id="refreshButton">刷新歌曲</button>
+      <button id="settingsButton" class="secondary">运行设置</button>
+    </section>
+
+    <section id="settingsPanel" class="panel settings hidden">
+      <div class="section-heading">
+        <div>
+          <p class="eyebrow">SETTINGS</p>
+          <h2>运行设置</h2>
+        </div>
+        <button id="probeButton" class="secondary">重新检测编码器</button>
+      </div>
+      <div class="settings-grid">
+        <label>编码器
+          <select id="encoderInput">
+            <option value="auto">自动选择</option>
+            <option value="h264_nvenc">NVIDIA NVENC</option>
+            <option value="h264_qsv">Intel Quick Sync</option>
+            <option value="h264_amf">AMD AMF</option>
+            <option value="libx264">CPU libx264</option>
+          </select>
+        </label>
+        <label>宽度<input id="widthInput" type="number" min="640" max="7680"></label>
+        <label>高度<input id="heightInput" type="number" min="360" max="4320"></label>
+        <label>帧率<input id="fpsInput" type="number" min="24" max="120"></label>
+        <label>画质
+          <select id="qualityInput">
+            <option value="balanced">均衡</option>
+            <option value="high">高</option>
+            <option value="maximum">最高</option>
+          </select>
+        </label>
+      </div>
+      <div id="encoderDetails" class="encoder-details"></div>
+      <button id="saveSettingsButton">保存设置</button>
+      <span class="hint">录制参数修改后需要重启应用。</span>
+    </section>
+
+    <section class="section-heading">
+      <div>
+        <p class="eyebrow">SONG LIBRARY</p>
+        <h2>歌曲库</h2>
+      </div>
+      <span id="songCount"></span>
+    </section>
+    <section id="songGrid" class="song-grid"></section>
+    <div class="load-more">
+      <button id="loadMoreButton" class="secondary hidden">再显示 120 首</button>
+    </div>
+
+    <section id="workspace" class="workspace hidden">
+      <div class="section-heading">
+        <div>
+          <p class="eyebrow">WORKSPACE</p>
+          <h2 id="workspaceTitle">歌曲</h2>
+        </div>
+        <button id="closeWorkspace" class="secondary">关闭</button>
+      </div>
+      <div id="difficultyTabs" class="tabs"></div>
+      <div class="workspace-actions panel">
+        <label class="check"><input id="forceInput" type="checkbox"> 强制重建可视化</label>
+        <button id="runButton">开始完整处理</button>
+        <a id="analysisLink" class="button-link disabled" target="_blank">打开分析页面</a>
+      </div>
+      <div class="editors">
+        <section class="panel">
+          <div class="editor-title">
+            <h3>拍号文件</h3>
+            <button id="saveMeterButton">保存拍号</button>
+          </div>
+          <textarea id="meterEditor" spellcheck="false"></textarea>
+        </section>
+        <section class="panel">
+          <div class="editor-title">
+            <h3>扫键标记谱面</h3>
+            <button id="saveSweepButton">保存扫键标记</button>
+          </div>
+          <textarea id="sweepEditor" spellcheck="false"></textarea>
+        </section>
+      </div>
+      <section class="panel job-panel">
+        <div class="progress"><span id="progressBar"></span></div>
+        <div class="job-line">
+          <strong id="jobStatus">尚未启动任务</strong>
+          <button id="cancelButton" class="danger hidden">停止任务</button>
+        </div>
+        <pre id="jobLog"></pre>
+      </section>
+    </section>
+  </main>
+  <div id="toast" class="toast hidden"></div>
+  <script src="/static/app.js"></script>
+</body>
+</html>
