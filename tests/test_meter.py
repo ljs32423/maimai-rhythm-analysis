@@ -37,6 +37,21 @@ class MeterTests(unittest.TestCase):
         }, total_beats=13)
         self.assertEqual(meter_map.boundaries(0, 13), [0.0, 4.0, 7.0, 10.0, 13.0])
 
+    def test_measure_numbering_starts_with_measure_containing_first_note(self):
+        meter_map = MeterMap.from_dict({
+            "default": "7/4",
+            "sections": [{"start_beat": 0, "signature": "7/4"}],
+        }, total_beats=28)
+
+        self.assertEqual(
+            meter_map.numbered_boundaries(7.0, 28.0),
+            [7.0, 14.0, 21.0, 28.0],
+        )
+        self.assertEqual(
+            meter_map.numbered_boundaries(9.0, 28.0),
+            [7.0, 14.0, 21.0, 28.0],
+        )
+
     def test_missing_meter_file_is_initialized_as_editable_4_4_template(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -126,6 +141,102 @@ class MeterTests(unittest.TestCase):
             primitive[0] == "text" and primitive[3] == "7/8"
             for primitive in primitives
         ))
+
+    def test_renderer_hides_dense_weak_lines_for_special_meter_grid(self):
+        meter_map = MeterMap.from_dict({
+            "default": "3/16",
+            "sections": [{"start_beat": 0, "signature": "3/16"}],
+        }, total_beats=2.25)
+        chart = Chart("13", "Tester", [], [(0.0, 120.0)])
+
+        primitives, _ = visualize.build_primitives(
+            [], 4, 2.25, 120, chart, meter_map,
+        )
+
+        def x_at(beat):
+            return visualize.PAD_X + beat * visualize.PX_PER_BEAT
+
+        for boundary in (0.0, 0.75, 1.5, 2.25):
+            self.assertTrue(any(
+                primitive[0] == "line"
+                and abs(primitive[1] - x_at(boundary)) < 1e-6
+                and primitive[-1] == 2.0
+                for primitive in primitives
+            ))
+        for denominator_beat in (0.25, 0.5, 1.0, 1.25, 1.75, 2.0):
+            self.assertFalse(any(
+                primitive[0] == "line"
+                and abs(primitive[1] - x_at(denominator_beat)) < 1e-6
+                and primitive[-1] == 0.85
+                for primitive in primitives
+            ))
+            self.assertFalse(any(
+                primitive[0] == "dot"
+                and abs(primitive[1] - x_at(denominator_beat)) < 1e-6
+                for primitive in primitives
+            ))
+
+    def test_renderer_hides_weak_lines_for_eighth_note_meter(self):
+        meter_map = MeterMap.from_dict({
+            "default": "7/8",
+            "sections": [{"start_beat": 0, "signature": "7/8"}],
+        }, total_beats=3.5)
+        chart = Chart("13", "Tester", [], [(0.0, 120.0)])
+
+        primitives, _ = visualize.build_primitives(
+            [], 4, 3.5, 120, chart, meter_map,
+        )
+
+        for denominator_beat in (0.5, 1.0, 1.5, 2.0, 2.5, 3.0):
+            x = visualize.PAD_X + denominator_beat * visualize.PX_PER_BEAT
+            self.assertFalse(any(
+                primitive[0] == "line"
+                and abs(primitive[1] - x) < 1e-6
+                and primitive[-1] == 0.85
+                for primitive in primitives
+            ))
+
+    def test_renderer_hides_weak_lines_for_compound_meter(self):
+        meter_map = MeterMap.from_dict({
+            "default": "6/8",
+            "sections": [{"start_beat": 0, "signature": "6/8"}],
+        }, total_beats=3)
+        chart = Chart("13", "Tester", [], [(0.0, 120.0)])
+
+        primitives, _ = visualize.build_primitives(
+            [], 4, 3, 120, chart, meter_map,
+        )
+
+        weak_line_beats = {
+            round((primitive[1] - visualize.PAD_X) / visualize.PX_PER_BEAT, 6)
+            for primitive in primitives
+            if primitive[0] == "line" and primitive[-1] == 0.85
+        }
+        self.assertEqual(
+            {beat for beat in weak_line_beats if 0 < beat < 3},
+            set(),
+        )
+
+    def test_renderer_draws_quarter_note_meter_weak_lines(self):
+        meter_map = MeterMap.from_dict({
+            "default": "5/4",
+            "sections": [{"start_beat": 0, "signature": "5/4"}],
+        }, total_beats=5)
+        chart = Chart("13", "Tester", [], [(0.0, 120.0)])
+
+        primitives, _ = visualize.build_primitives(
+            [], 8, 5, 120, chart, meter_map,
+        )
+
+        weak_line_beats = {
+            round((primitive[1] - visualize.PAD_X) / visualize.PX_PER_BEAT, 6)
+            for primitive in primitives
+            if primitive[0] == "line" and primitive[-1] == 0.85
+        }
+        self.assertEqual(
+            {beat for beat in weak_line_beats if 0 < beat < 5},
+            {1.0, 2.0, 3.0, 4.0},
+        )
 
 
 if __name__ == "__main__":

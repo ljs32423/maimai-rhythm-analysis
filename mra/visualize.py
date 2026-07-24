@@ -114,6 +114,7 @@ RUN_INFERENCE_QUINTUPLET_MAX_PHASE_ERROR = 0.22
 RUN_INFERENCE_MAX_NORMALIZED_BEATS = 1.0
 SWEEP_MIN_NOTES = 3
 SWEEP_MAX_INTERVAL_BEATS = 4 / 24  # 24分音符，或更密
+SWEEP_TWO_HAND_MAX_INTERVAL_BEATS = 4 / 16  # 双手各扫一键时，16分双押等效为32分密度
 SWEEP_INTERVAL_TOLERANCE = 1e-6
 
 
@@ -370,6 +371,12 @@ def _is_dense_sweep_gap(events, left: int, right: int) -> bool:
             SWEEP_MAX_INTERVAL_BEATS + SWEEP_INTERVAL_TOLERANCE)
 
 
+def _is_dense_two_hand_sweep_gap(events, left: int, right: int) -> bool:
+    gap = events[right]['beat'] - events[left]['beat']
+    return (SWEEP_INTERVAL_TOLERANCE < gap <=
+            SWEEP_TWO_HAND_MAX_INTERVAL_BEATS + SWEEP_INTERVAL_TOLERANCE)
+
+
 def _outer_button_direction(current: int, following: int) -> int:
     delta = (following - current) % 8
     if delta == 1:
@@ -407,6 +414,71 @@ def _sweep_start_direction(events, index: int) -> int:
     return direction if expected_head in head_buttons else 0
 
 
+def _advance_outer_button(button: int, direction: int) -> int:
+    return ((button + direction - 1) % 8) + 1
+
+
+def _two_hand_sweep_end(events, index: int) -> int | None:
+    """Return the last event of two simultaneous outer-key sweeps.
+
+    The two hands are tracked independently, so parallel sweeps and
+    converging/diverging sweeps are both accepted.
+    """
+    if index + 2 >= len(events):
+        return None
+    if not _is_dense_two_hand_sweep_gap(events, index, index + 1):
+        return None
+
+    head = tuple(sorted(_event_outer_buttons(events[index])))
+    following = tuple(sorted(_event_outer_buttons(events[index + 1])))
+    if len(head) != 2 or len(following) != 2:
+        return None
+
+    states: list[tuple[tuple[int, int], tuple[int, int]]] = []
+    for assigned_following in (following, (following[1], following[0])):
+        directions = tuple(
+            _outer_button_direction(current, next_button)
+            for current, next_button in zip(head, assigned_following)
+        )
+        if all(directions):
+            states.append((assigned_following, directions))
+    if not states:
+        return None
+
+    end = index + 1
+    while end + 1 < len(events):
+        if not _is_dense_two_hand_sweep_gap(events, end, end + 1):
+            break
+        next_buttons = _event_outer_buttons(events[end + 1])
+        if len(next_buttons) != 2:
+            break
+        next_states = []
+        for positions, directions in states:
+            expected = tuple(
+                _advance_outer_button(button, direction)
+                for button, direction in zip(positions, directions)
+            )
+            if len(set(expected)) == 2 and set(expected) == next_buttons:
+                next_states.append((expected, directions))
+        if not next_states:
+            break
+        states = next_states
+        end += 1
+
+    return end if end - index + 1 >= SWEEP_MIN_NOTES else None
+
+
+def _mark_two_hand_sweep_starts(events) -> None:
+    index = 0
+    while index + SWEEP_MIN_NOTES - 1 < len(events):
+        end = _two_hand_sweep_end(events, index)
+        if end is None:
+            index += 1
+            continue
+        events[index]['is_sweep_start'] = True
+        index = end
+
+
 def _mark_sweep_starts(events) -> None:
     """Mark the first event of every dense, one-directional three-button staircase."""
     for event in events:
@@ -428,6 +500,7 @@ def _mark_sweep_starts(events) -> None:
 
         # The last note can also be the turning point of a sweep in the other direction.
         index = end
+    _mark_two_hand_sweep_starts(events)
 
 
 def compute_rhythm_events(chart: Chart):
@@ -592,6 +665,78 @@ def _event_ring_style(notes, is_sweep_start=False):
     return color, dash
 
 
+def _meter_weak_groups(measure) -> tuple[int, ...] | None:
+    """Only quarter-note meters receive internal weak lines."""
+    signature = measure.signature
+    if signature.denominator == 4:
+        return (1,) * signature.numerator
+    return None
+
+
+def _meter_grid_positions(meter_map: MeterMap, start: float,
+                          end: float) -> tuple[list[float], list[float], list[float]]:
+    """Build measure, metric-group and subdivision positions from meter data."""
+    if end < start:
+        start, end = end, start
+    max_measure_beats = max(
+        measure.signature.measure_beats for measure in meter_map.measures
+    )
+    scan_start = start - max_measure_beats - 1e-6
+    scan_end = end + max_measure_beats + 1e-6
+    all_boundaries = meter_map.boundaries(scan_start, scan_end)
+    boundary_keys = {
+        round(value, 6) for value in all_boundaries
+        if start - 1e-6 <= value <= end + 1e-6
+    }
+    denominator_positions: set[float] = set()
+    beat_positions: set[float] = set()
+    subdivision_positions: set[float] = set()
+
+    for left, right in zip(all_boundaries, all_boundaries[1:]):
+        if right < start - 1e-6 or left > end + 1e-6:
+            continue
+        measure = meter_map.measure_at(left + 1e-6)
+        signature = measure.signature
+        denominator_beat = 4.0 / signature.denominator
+        for step in range(1, signature.numerator):
+            value = left + step * denominator_beat
+            key = round(value, 6)
+            if (start - 1e-6 <= value <= end + 1e-6 and
+                    key not in boundary_keys):
+                denominator_positions.add(key)
+
+        groups = _meter_weak_groups(measure)
+        if groups is not None:
+            units = 0
+            for group in groups[:-1]:
+                units += group
+                value = left + units * denominator_beat
+                key = round(value, 6)
+                if (start - 1e-6 <= value <= end + 1e-6 and
+                        key not in boundary_keys):
+                    beat_positions.add(key)
+
+        # Keep the existing sixteenth-note reference density, but anchor it to
+        # each meter measure. For /8 and /16 signatures, denominator beats take
+        # precedence over dots.
+        subdivision = min(0.25, denominator_beat)
+        step = 1
+        while left + step * subdivision < right - 1e-6:
+            value = left + step * subdivision
+            key = round(value, 6)
+            if (start - 1e-6 <= value <= end + 1e-6 and
+                    key not in boundary_keys and
+                    key not in denominator_positions):
+                subdivision_positions.add(key)
+            step += 1
+
+    return (
+        sorted(boundary_keys),
+        sorted(beat_positions),
+        sorted(subdivision_positions),
+    )
+
+
 # ============ 原语构造 (SVG 与 matplotlib 共用) ============
 # 原语: (kind, *args)
 
@@ -617,32 +762,30 @@ def build_primitives(events, row_beats, total_beats, bpm, chart, meter_map=None)
         left_grid_beats = int(math.ceil(PAD_X / PX_PER_BEAT))
         grid_start = b0 - left_grid_beats
         grid_end = min(total_beats, b0 + row_beats)
-        boundaries = meter_map.boundaries(grid_start, b0 + row_beats)
+        boundaries, meter_beats, subdivisions = _meter_grid_positions(
+            meter_map, grid_start, grid_end,
+        )
         boundary_keys = {round(boundary, 6) for boundary in boundaries}
-        integer_beats = list(range(math.ceil(grid_start), math.floor(grid_end) + 1))
-        grid_beats = sorted(set(float(beat) for beat in integer_beats) | set(boundaries))
-        for absolute_beat in grid_beats:
+        for absolute_beat in boundaries:
             beat_in_row = absolute_beat - b0
             x = beat_to_x_in_row(beat_in_row)
             if not 0 <= x <= right_edge + 1e-6:
                 continue
-            is_measure = round(absolute_beat, 6) in boundary_keys
-            if is_measure:
-                prims.append(('line', x, y0 + 1, x, y0 + NOTE_AREA_H - 1,
-                              '#ffffff', 2.0))
-            elif abs(absolute_beat - round(absolute_beat)) < 1e-6:
+            prims.append(('line', x, y0 + 1, x, y0 + NOTE_AREA_H - 1,
+                          '#ffffff', 2.0))
+
+        # 拍内短线只表示实际节拍分组，不再机械标出每个分母单位。
+        for absolute_beat in meter_beats:
+            x = beat_to_x_in_row(absolute_beat - b0)
+            if 0 <= x <= right_edge + 1e-6:
                 prims.append(('line', x, y0 + 3, x, y0 + 15, '#ffffff', 0.85))
                 prims.append(('line', x, y0 + NOTE_AREA_H - 15,
                               x, y0 + NOTE_AREA_H - 3, '#ffffff', 0.85))
 
-        # 每个四分音符拍内的四等分点；若该位置本身是变拍号小节线则不画点。
-        for absolute_beat in range(math.ceil(grid_start), math.floor(grid_end) + 1):
-            for sub in (0.25, 0.5, 0.75):
-                sub_beat = absolute_beat + sub
-                sx = beat_to_x_in_row(sub_beat - b0)
-                if (sub_beat <= grid_end + 1e-6 and 0 <= sx < right_edge and
-                        round(sub_beat, 6) not in boundary_keys):
-                    prims.append(('dot', sx, y0 + NOTE_CY, 0.8, '#666666'))
+        for absolute_beat in subdivisions:
+            x = beat_to_x_in_row(absolute_beat - b0)
+            if 0 <= x < right_edge:
+                prims.append(('dot', x, y0 + NOTE_CY, 0.8, '#666666'))
 
         # 只在开头和拍号变化处标注，避免每小节重复文字。
         visible_measures = [measure for measure in meter_map.measures

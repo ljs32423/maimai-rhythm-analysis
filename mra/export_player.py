@@ -160,6 +160,8 @@ def export_player(song_dir: str | Path, difficulty: int,
         raise ValueError(f"{song.title} difficulty {difficulty} contains no notes")
     ensure_sweep_maidata_for_song(song_root, song)
 
+    first_note_time = min(note.time_sec for note in chart.notes)
+    first_note_beat = time_to_beat(first_note_time, chart.bpm_timeline)
     last_note_time = max(note.time_sec + note.duration_sec for note in chart.notes)
     last_note_beat = time_to_beat(last_note_time, chart.bpm_timeline)
     meter_map = ensure_meter_file(song_root, difficulty, last_note_beat)
@@ -240,7 +242,9 @@ def export_player(song_dir: str | Path, difficulty: int,
         "timing": {
             "bpm_timeline": timings,
             "measure_boundaries": [round(value, 9)
-                                   for value in meter_map.boundaries(0.0, total_beats)],
+                                   for value in meter_map.numbered_boundaries(
+                                       first_note_beat, last_note_beat,
+                                   )],
             "meter_sections": meter_map.signature_sections(),
         },
         "scene": {

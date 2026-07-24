@@ -97,6 +97,23 @@ class PlayerExportTests(unittest.TestCase):
                 for primitive in scene["primitives"]
             ))
 
+    def test_measure_numbering_ignores_empty_measures_before_first_note(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            song = self.make_song(Path(tmp))
+            maidata = song / "maidata.txt"
+            maidata.write_text(
+                MAIDATA.replace("{4}1,A1,3b,4x,E", "{4},,,,1,A1,3b,4x,E"),
+                encoding="utf-8",
+            )
+
+            manifest_path = export_player(song, 5)
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+
+            self.assertEqual(
+                manifest["timing"]["measure_boundaries"],
+                [4.0],
+            )
+
     def test_backend_export_stdout_is_json_lines_only(self):
         with tempfile.TemporaryDirectory() as tmp:
             song = self.make_song(Path(tmp))

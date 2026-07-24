@@ -803,6 +803,23 @@ class WorkflowTests(unittest.TestCase):
             self.assertIn('--delay-fill-start: 50%; --delay-fill-end: 50%;', html)
             self.assertIn('rgba(77,208,225,0.14)', html)
 
+    def test_html_measure_one_contains_first_note(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            maidata = MAIDATA_WITH_REMASTER.replace(
+                "{4}1,2,E", "{4},,,,1,2,E",
+            )
+            (root / "maidata.txt").write_text(maidata, encoding="utf-8")
+            (root / "ReMASTER_strip.svg").write_text(
+                '<svg width="960" height="66"></svg>', encoding="utf-8"
+            )
+
+            output = make_html.generate_html(str(root), "test", diff_id=6)
+            html = Path(output).read_text(encoding="utf-8")
+
+            self.assertIn('const MEASURE_BOUNDARIES = [4.0];', html)
+            self.assertIn('<strong id="measureNumber">1</strong><em>/ 1</em>', html)
+
     def test_html_uses_svg_segments_when_available(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -924,12 +941,31 @@ class WorkflowTests(unittest.TestCase):
             [3, 2, 1, 8, 7],
         )
 
-    def test_sweep_rejects_slower_two_note_and_chord_staircases(self):
+    def test_sweep_supports_simultaneous_two_hand_staircases(self):
+        cases = (
+            "{16}4/8,3/7,2/6,1/5,E",  # parallel counter-clockwise
+            "{16}1/8,2/7,3/6,E",      # hands move towards each other
+            "{24}1/5,2/6,3/7,4/8,E",  # denser parallel sweep
+        )
+        for inote in cases:
+            with self.subTest(inote=inote):
+                notes, timeline, _ = parse_inote(inote, 120)
+                chart = Chart(level=12, designer="Tester", notes=notes,
+                              bpm_timeline=timeline)
+                events = visualize.compute_rhythm_events(chart)
+                self.assertEqual(
+                    [index for index, event in enumerate(events)
+                     if event['is_sweep_start']],
+                    [0],
+                )
+
+    def test_sweep_rejects_slower_two_note_and_inconsistent_chord_staircases(self):
         cases = (
             "{8}1,2,3,4,5,E",
             "{16}1,2,3,4,5,E",
             "{24}1,2,E",
-            "{24}1/5,2/6,3/7,4/8,5/1,E",
+            "{8}1/5,2/6,3/7,4/8,E",
+            "{16}1/5,2/7,3/8,E",
         )
         for inote in cases:
             with self.subTest(inote=inote):

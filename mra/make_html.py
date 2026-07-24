@@ -117,9 +117,11 @@ def generate_html(song_dir, song_id, diff_id=5, offset=0.0):
     duration_text = f'{int(chart_duration // 60)}:{int(chart_duration % 60):02d}'
     total_beats = time_to_beat(chart_duration, ch.bpm_timeline)
     meter_map = load_meter_map(song_root, diff_id, total_beats)
-    measure_boundaries = meter_map.boundaries(0.0, total_beats)
+    first_note_time = min(note.time_sec for note in ch.notes)
+    first_note_beat = time_to_beat(first_note_time, ch.bpm_timeline)
+    measure_boundaries = meter_map.numbered_boundaries(first_note_beat, total_beats)
     if not measure_boundaries:
-        measure_boundaries = [0.0]
+        measure_boundaries = [first_note_beat]
     meter_sections = [
         {"start_beat": section["start_beat"], "signature": section["signature"]}
         for section in meter_map.signature_sections()
