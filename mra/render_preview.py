@@ -824,7 +824,12 @@ def record_preview(majdata_home: Path, song_dir: Path, difficulty: int,
         raise RuntimeError("未找到 FFmpeg，无法检查录制画面")
 
     configure_recorder(majdata_home)
-    with tempfile.TemporaryDirectory(prefix=".majdata-record-", dir=song_dir) as temp_dir:
+    # MajdataViewX opens its recording folder in Explorer when a recording
+    # finishes. Keeping that folder inside the song directory can leave an
+    # access-permission dialog behind while TemporaryDirectory removes it.
+    # Use the current user's system temp directory instead: Explorer can open
+    # and close it normally, and cleanup no longer touches the browsed library.
+    with tempfile.TemporaryDirectory(prefix="mra-majdata-record-") as temp_dir:
         work_dir = Path(temp_dir)
         raw_output = work_dir / "out.mp4"
         pv_path = prepare_recording_assets(ffmpeg, song_dir, work_dir)

@@ -36,6 +36,8 @@ class MeterTests(unittest.TestCase):
             ],
         }, total_beats=13)
         self.assertEqual(meter_map.boundaries(0, 13), [0.0, 4.0, 7.0, 10.0, 13.0])
+        self.assertEqual(meter_map.measure_at(6.999).signature.label, "4/4")
+        self.assertEqual(meter_map.measure_at(7.0).signature.label, "3/4")
 
     def test_measure_numbering_starts_with_measure_containing_first_note(self):
         meter_map = MeterMap.from_dict({
@@ -117,6 +119,24 @@ class MeterTests(unittest.TestCase):
             [(item["start_beat"], item["signature"]) for item in data["sections"]],
             [(0.0, "4/4"), (8.0, "3/4")],
         )
+
+    def test_explicit_meter_change_after_last_note_is_preserved(self):
+        meter_map = MeterMap.from_dict({
+            "sections": [
+                {"start_beat": 0, "signature": "4/4"},
+                {"start_beat": 8, "signature": "11/8"},
+                {"start_beat": 19, "signature": "4/4"},
+            ],
+        }, total_beats=17)
+
+        self.assertEqual(
+            [
+                (section["start_beat"], section["signature"])
+                for section in meter_map.signature_sections()
+            ],
+            [(0.0, "4/4"), (8.0, "11/8"), (19.0, "4/4")],
+        )
+        self.assertEqual(meter_map.measure_at(19).signature.label, "4/4")
 
     def test_renderer_draws_half_beat_measure_boundary_and_change_label(self):
         meter_map = MeterMap.from_dict({

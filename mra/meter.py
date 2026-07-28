@@ -85,8 +85,6 @@ class MeterMap:
             if measure.start_beat > beat + EPSILON:
                 break
             result = measure
-            if beat < measure.end_beat - EPSILON:
-                break
         return result
 
     def boundaries(self, start: float, end: float) -> list[float]:
@@ -201,7 +199,10 @@ def _expand_sections(sections: Sequence[MeterMeasure],
     ordered = sorted(sections, key=lambda section: section.start_beat)
     for index, section in enumerate(ordered):
         end = ordered[index + 1].start_beat if index + 1 < len(ordered) else total_beats
-        cursor = section.start_beat
+        # 人工变化点即使位于最后一个音符之后也必须保留，尾部留白需要
+        # 继续显示该拍号。后续逐小节节点再按当前拍号展开。
+        result.append(section)
+        cursor = section.start_beat + section.signature.measure_beats
         while cursor < end - EPSILON:
             result.append(MeterMeasure(
                 cursor, section.signature, section.confidence, section.source,

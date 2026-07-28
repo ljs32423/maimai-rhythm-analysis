@@ -35,7 +35,7 @@ from .sweep_marks import apply_sweep_maidata
 # Arcaea 常量 (与 4.py 完全一致)
 # 降低滚动条整体缩放，等价于降低屏幕上“每拍经过的像素数”，从而减慢观感滚动速度。
 SVG_SCALE = 1.8
-PLAYER_RENDERER_VERSION = 6
+PLAYER_RENDERER_VERSION = 9
 
 
 ANALYSIS_SERVER_SCRIPT = r'''#!/usr/bin/env python3
@@ -105,7 +105,13 @@ class AnalysisHandler(SimpleHTTPRequestHandler):
                 chunk = source.read(min(1024 * 1024, remaining))
                 if not chunk:
                     break
-                self.wfile.write(chunk)
+                try:
+                    self.wfile.write(chunk)
+                except (BrokenPipeError, ConnectionResetError,
+                        ConnectionAbortedError):
+                    # Browsers routinely cancel an obsolete Range request
+                    # after seeking or changing their read-ahead window.
+                    break
                 remaining -= len(chunk)
         return True
 
@@ -281,11 +287,13 @@ def generate_html(song_dir, song_id, diff_id=5, offset=0.0):
         start_display_beat = int(start_display_beat)
 
     mime_types = {'.mp4': 'video/mp4', '.webm': 'video/webm', '.mkv': 'video/x-matroska'}
-    video_sources = '\n'.join(
-        f'        <source src="{html.escape(asset_url(path))}" '
-        f'type="{mime_types.get(path.suffix.lower(), "video/mp4")}">'
+    video_sources_js = [
+        {
+            'src': asset_url(path),
+            'type': mime_types.get(path.suffix.lower(), 'video/mp4'),
+        }
         for path in pv_paths
-    )
+    ]
 
     # 将超长 SVG 切成较短的独立图片。每段保持全局 viewBox 坐标，前端只需
     # 平移一个父合成层；分段本身在播放前全部加载、解码并固定挂载。
@@ -488,6 +496,20 @@ body {{
 }}
 .video-empty[hidden] {{ display: none; }}
 .video-empty strong {{ display: block; color: #d3d4da; margin-bottom: 5px; font-size: 16px; }}
+.video-preload-status {{
+    position: absolute; inset: 0; z-index: 2;
+    display: flex; flex-direction: column; align-items: center; justify-content: center;
+    gap: 7px; pointer-events: none;
+    color: rgba(223, 230, 244, 0.9); text-align: center;
+    background: radial-gradient(circle, rgba(22, 28, 43, 0.72), rgba(0, 0, 0, 0.92));
+}}
+.video-preload-status[hidden] {{ display: none; }}
+.video-preload-status strong {{ font-size: 15px; }}
+.video-preload-status span {{
+    color: rgba(155, 206, 238, 0.9);
+    font-family: Consolas, monospace; font-size: 11px;
+    font-variant-numeric: tabular-nums;
+}}
 .local-file-warning {{
     position: fixed; top: 12px; left: 50%; transform: translateX(-50%);
     z-index: 100; max-width: min(92vw, 720px); padding: 9px 14px;
@@ -852,9 +874,11 @@ body {{
 <div class="video-area">
     <div class="video-pane">
         <div class="video-crop">
-            <video id="pv" preload="auto">
-{video_sources}
-            </video>
+            <video id="pv" preload="metadata" playsinline></video>
+            <div class="video-preload-status" id="videoPreloadStatus">
+                <strong>正在准备播放器</strong>
+                <span id="videoPreloadProgress">正在读取视频元数据…</span>
+            </div>
         </div>
         <div class="video-empty" id="videoEmpty">
             <strong>预览视频不可用</strong>{html.escape(pv_name)}
@@ -1588,6 +1612,7 @@ const VIDEO_OFFSET_SVG = {auto_offset};
 const START_DISPLAY_BEAT_SVG = {start_display_beat};
 const STRIP_WIDTH_SVG = {svg_w};
 const SEGMENTS_SVG = {json.dumps(segments_js, ensure_ascii=False)};
+const VIDEO_SOURCES_SVG = {json.dumps(video_sources_js, ensure_ascii=False)};
 const HAS_SEGMENTS_SVG = SEGMENTS_SVG.length > 0;
 const STATUS_INTERVAL_SVG_MS = 100;
 
@@ -1605,6 +1630,8 @@ const delaySliderSvg = document.getElementById('delaySlider');
 const delayInputSvg = document.getElementById('delayInput');
 const pvSvg = document.getElementById('pv');
 const videoEmptySvg = document.getElementById('videoEmpty');
+const videoPreloadStatusSvg = document.getElementById('videoPreloadStatus');
+const videoPreloadProgressSvg = document.getElementById('videoPreloadProgress');
 const localFileWarningSvg = document.getElementById('localFileWarning');
 const bpmNumberSvg = document.getElementById('bpmNumber');
 const measureNumberSvg = document.getElementById('measureNumber');
@@ -1614,8 +1641,11 @@ const seekWrapSvg = document.querySelector('.seek-wrap');
 let playingSvg = false;
 let seekingSvg = false;
 let pvReadySvg = false;
+let videoPreloadStateSvg = 'loading';
 let segmentsReadySvg = !HAS_SEGMENTS_SVG;
 let rafSvg = null;
+let stripAnimationSvg = null;
+let compositorScrollSvg = false;
 let delaySvgMs = 0;
 let markerCenterSvg = null;
 let lastDistanceSvg = null;
@@ -1635,11 +1665,15 @@ let renderedFramesSvg = 0;
 let lastFrameAtSvg = null;
 let maxFrameGapSvg = 0;
 let lastStatsPublishAtSvg = 0;
+let videoStallCountSvg = 0;
 
 if (window.location.protocol === 'file:') {{
     localFileWarningSvg.hidden = false;
 }}
 document.body.dataset.rendererMode = 'segmented-svg';
+document.body.dataset.clockMode = 'monotonic-no-mid-playback-correction';
+document.body.dataset.scrollDriver = 'initializing';
+document.body.dataset.videoPreloadState = videoPreloadStateSvg;
 document.body.dataset.svgSegmentCount = String(SEGMENTS_SVG.length);
 document.body.dataset.svgSegmentsReady = String(segmentsReadySvg);
 if (HAS_SEGMENTS_SVG) {{
@@ -1744,7 +1778,6 @@ function playbackTimeSvg(timestamp = performance.now()) {{
         || seekingSvg
         || pvSvg.paused
         || pvSvg.seeking
-        || pvSvg.readyState < 2
     ) {{
         return actual;
     }}
@@ -1756,15 +1789,135 @@ function playbackTimeSvg(timestamp = performance.now()) {{
     return Math.max(0, Math.min(duration, predicted));
 }}
 
-function renderStripSvg(videoTime) {{
-    const state = videoStateSvg(videoTime);
+function scrollDistanceSvg(beat) {{
     if (markerCenterSvg === null) {{
         const marker = playMarkerSvg.getBoundingClientRect();
         markerCenterSvg = marker.left + marker.width / 2;
     }}
-    const distance = state.beat * PX_PER_BEAT_SVG
+    return beat * PX_PER_BEAT_SVG
         + PAD_X_SVG
         - markerCenterSvg / SVG_DISPLAY_SCALE;
+}}
+
+function stripTransformSvg(beat) {{
+    return 'translate3d(' + (-scrollDistanceSvg(beat)) + 'px,0,0)';
+}}
+
+function destroyStripAnimationSvg() {{
+    if (stripAnimationSvg !== null) {{
+        stripAnimationSvg.cancel();
+        stripAnimationSvg = null;
+    }}
+    compositorScrollSvg = false;
+    document.body.dataset.scrollDriver = 'request-animation-frame';
+}}
+
+function buildStripAnimationSvg() {{
+    destroyStripAnimationSvg();
+    if (
+        !HAS_SEGMENTS_SVG
+        || typeof virtualStripSvg.animate !== 'function'
+        || !Number.isFinite(pvSvg.duration)
+        || pvSvg.duration <= 0
+    ) {{
+        return;
+    }}
+    const duration = pvSvg.duration;
+    const points = [
+        {{ time: 0, beat: videoStateSvg(0).beat }},
+    ];
+    for (const timing of TIMINGS_SVG) {{
+        const videoTime = timing.time
+            + VIDEO_OFFSET_SVG
+            + delaySvgMs / 1000;
+        if (videoTime > 0 && videoTime < duration) {{
+            points.push({{ time: videoTime, beat: timing.beat }});
+        }}
+    }}
+    points.push({{
+        time: duration,
+        beat: videoStateSvg(duration).beat,
+    }});
+    points.sort((left, right) => left.time - right.time);
+
+    const keyframes = [];
+    for (const point of points) {{
+        const offset = Math.max(0, Math.min(1, point.time / duration));
+        const previous = keyframes[keyframes.length - 1];
+        const keyframe = {{
+            offset,
+            transform: stripTransformSvg(point.beat),
+            easing: 'linear',
+        }};
+        if (previous && Math.abs(previous.offset - offset) < 1e-9) {{
+            keyframes[keyframes.length - 1] = keyframe;
+        }} else {{
+            keyframes.push(keyframe);
+        }}
+    }}
+    if (keyframes.length === 1) {{
+        keyframes.push({{ ...keyframes[0], offset: 1 }});
+    }}
+    stripAnimationSvg = virtualStripSvg.animate(keyframes, {{
+        duration: duration * 1000,
+        fill: 'both',
+        easing: 'linear',
+    }});
+    stripAnimationSvg.pause();
+    stripAnimationSvg.currentTime = Math.max(
+        0,
+        Math.min(duration, playbackTimeSvg())
+    ) * 1000;
+    stripAnimationSvg.playbackRate = pvSvg.playbackRate;
+    compositorScrollSvg = true;
+    document.body.dataset.scrollDriver = 'web-animations-compositor';
+}}
+
+function syncStripAnimationSvg(videoTime) {{
+    if (!compositorScrollSvg || stripAnimationSvg === null) return;
+    const duration = Number.isFinite(pvSvg.duration) ? pvSvg.duration : 0;
+    stripAnimationSvg.currentTime = Math.max(
+        0,
+        Math.min(duration, videoTime)
+    ) * 1000;
+}}
+
+function startStripAnimationSvg(videoTime) {{
+    if (!compositorScrollSvg || stripAnimationSvg === null) return;
+    stripAnimationSvg.pause();
+    stripAnimationSvg.playbackRate = pvSvg.playbackRate;
+    syncStripAnimationSvg(videoTime);
+    stripAnimationSvg.play();
+}}
+
+function pauseStripAnimationSvg(videoTime) {{
+    if (!compositorScrollSvg || stripAnimationSvg === null) return;
+    stripAnimationSvg.pause();
+    syncStripAnimationSvg(videoTime);
+}}
+
+function rebuildStripAnimationSvg(videoTime = playbackTimeSvg()) {{
+    const shouldPlay = playingSvg && clockActiveSvg;
+    buildStripAnimationSvg();
+    syncStripAnimationSvg(videoTime);
+    if (shouldPlay && stripAnimationSvg !== null) {{
+        stripAnimationSvg.playbackRate = pvSvg.playbackRate;
+        stripAnimationSvg.play();
+    }}
+}}
+
+function renderStripSvg(videoTime) {{
+    const state = videoStateSvg(videoTime);
+    const distance = scrollDistanceSvg(state.beat);
+    if (compositorScrollSvg) {{
+        // The Web Animation runs on Chromium's compositor thread. The main
+        // thread only samples state for the low-frequency status UI.
+        lastDistanceSvg = distance;
+        if (!playingSvg || seekingSvg || !clockActiveSvg) {{
+            syncStripAnimationSvg(videoTime);
+        }}
+        return state;
+    }}
     if (
         lastDistanceSvg === null
         || Math.abs(distance - lastDistanceSvg) >= 0.001
@@ -1863,12 +2016,82 @@ function stopFramesSvg() {{
     rafSvg = null;
 }}
 
+function updateVideoPreloadStatusSvg(message, state = 'loading') {{
+    videoPreloadStateSvg = state;
+    document.body.dataset.videoPreloadState = state;
+    videoPreloadProgressSvg.textContent = message;
+    videoPreloadStatusSvg.hidden = state !== 'loading';
+}}
+
+function waitForVideoReadyStateSvg(
+    minimumReadyState,
+    eventName,
+    timeoutMs = 30000
+) {{
+    if (pvSvg.readyState >= minimumReadyState) return Promise.resolve();
+    return new Promise((resolve, reject) => {{
+        let timeoutId = null;
+        const cleanup = () => {{
+            pvSvg.removeEventListener(eventName, onReady);
+            pvSvg.removeEventListener('error', onError);
+            if (timeoutId !== null) clearTimeout(timeoutId);
+        }};
+        const onReady = () => {{
+            cleanup();
+            resolve();
+        }};
+        const onError = () => {{
+            cleanup();
+            reject(new Error('浏览器无法解码预览视频'));
+        }};
+        pvSvg.addEventListener(eventName, onReady, {{ once: true }});
+        pvSvg.addEventListener('error', onError, {{ once: true }});
+        timeoutId = setTimeout(() => {{
+            cleanup();
+            reject(new Error('等待视频解码超时'));
+        }}, timeoutMs);
+    }});
+}}
+
+async function prepareVideoSvg() {{
+    if (window.location.protocol === 'file:') {{
+        throw new Error('请使用“打开分析页面.cmd”通过本地服务打开');
+    }}
+    let lastError = null;
+    for (const source of VIDEO_SOURCES_SVG) {{
+        try {{
+            updateVideoPreloadStatusSvg(
+                '正在读取视频元数据：' + source.src
+            );
+            pvSvg.preload = 'metadata';
+            pvSvg.src = source.src;
+            pvSvg.load();
+            await waitForVideoReadyStateSvg(1, 'loadedmetadata');
+            document.body.dataset.videoPreloadSource = source.src;
+            updateVideoPreloadStatusSvg(
+                '视频将按需流式播放',
+                'ready'
+            );
+            refreshAvailabilitySvg();
+            return;
+        }} catch (error) {{
+            lastError = error;
+            pvSvg.removeAttribute('src');
+            pvSvg.load();
+        }}
+    }}
+    throw lastError || new Error('没有可用的预览视频');
+}}
+
 function refreshAvailabilitySvg() {{
-    pvReadySvg = pvSvg.readyState >= 1;
+    pvReadySvg = pvSvg.readyState >= 1 && Boolean(pvSvg.currentSrc);
     const ready = pvReadySvg && segmentsReadySvg;
+    document.body.dataset.playerPreloadReady = String(ready);
     pvSvg.hidden = !pvReadySvg;
-    videoEmptySvg.hidden = pvReadySvg;
+    videoEmptySvg.hidden = videoPreloadStateSvg !== 'error';
+    videoPreloadStatusSvg.hidden = videoPreloadStateSvg !== 'loading';
     btnPlaySvg.disabled = !ready;
+    btnPlaySvg.title = ready ? '播放' : '正在预热滚动条';
     btnRewindSvg.disabled = !ready;
     seekSliderSvg.disabled = !ready;
     speedSliderSvg.disabled = !ready;
@@ -1895,7 +2118,7 @@ function prepareSegmentsSvg() {{
         image.height = {svg_h};
         image.decoding = 'sync';
         image.loading = 'eager';
-        image.fetchPriority = index < 4 ? 'high' : 'auto';
+        image.fetchPriority = 'high';
         image.draggable = false;
         image.alt = '';
         image.setAttribute('aria-hidden', 'true');
@@ -1915,6 +2138,7 @@ function prepareSegmentsSvg() {{
     }}).then(() => {{
         segmentsReadySvg = true;
         document.body.dataset.svgSegmentsReady = 'true';
+        rebuildStripAnimationSvg();
         refreshAvailabilitySvg();
     }});
 }}
@@ -1935,13 +2159,15 @@ function playSvg() {{
 }}
 
 function pauseSvg() {{
+    const pausedTime = playbackTimeSvg();
     playingSvg = false;
     btnPlaySvg.textContent = '▶';
     btnPlaySvg.title = '播放';
     btnPlaySvg.setAttribute('aria-label', '播放');
     pvSvg.pause();
     stopFramesSvg();
-    anchorClockSvg(pvSvg.currentTime, false);
+    pauseStripAnimationSvg(pausedTime);
+    anchorClockSvg(pausedTime, false);
     renderAllSvg(true);
 }}
 
@@ -1950,6 +2176,7 @@ function seekSvg(time) {{
     const duration = Number.isFinite(pvSvg.duration) ? pvSvg.duration : time;
     pvSvg.currentTime = Math.max(0, Math.min(duration, time));
     anchorClockSvg(pvSvg.currentTime, false);
+    pauseStripAnimationSvg(pvSvg.currentTime);
     renderAllSvg(true);
 }}
 
@@ -1962,6 +2189,9 @@ function setRateSvg(value) {{
     );
     const current = playbackTimeSvg();
     pvSvg.playbackRate = rate;
+    if (stripAnimationSvg !== null) {{
+        stripAnimationSvg.playbackRate = rate;
+    }}
     anchorClockSvg(current, clockActiveSvg);
     const progress = (rate - 0.25) / 1.75 * 100;
     speedSliderSvg.style.setProperty('--speed-progress', progress + '%');
@@ -1984,6 +2214,7 @@ function setDelaySvg(value) {{
     if (document.activeElement !== delayInputSvg) {{
         delayInputSvg.value = delaySvgMs;
     }}
+    rebuildStripAnimationSvg();
     renderAllSvg(true);
 }}
 
@@ -2065,23 +2296,38 @@ document.addEventListener('keydown', (event) => {{
 
 pvSvg.addEventListener('loadedmetadata', () => {{
     seekSliderSvg.value = 0;
+    buildStripAnimationSvg();
     refreshAvailabilitySvg();
     setRateSvg(Number.parseFloat(speedSliderSvg.value) || 1);
     anchorClockSvg(0, false);
     renderAllSvg(true);
 }});
 pvSvg.addEventListener('playing', () => {{
-    anchorClockSvg(pvSvg.currentTime, true);
+    // Initial play/resume establishes the clock once. A decoder recovery emits
+    // `playing` too, but must never pull the already-running SVG clock.
+    if (playingSvg && !clockActiveSvg) {{
+        anchorClockSvg(pvSvg.currentTime, true);
+        startStripAnimationSvg(pvSvg.currentTime);
+    }}
     if (playingSvg) startFramesSvg();
 }});
 pvSvg.addEventListener('waiting', () => {{
-    anchorClockSvg(pvSvg.currentTime, false);
+    // PV data is streamed on demand. A network/decoder wait must not stop the
+    // independent compositor animation that drives the rhythm strip.
+    videoStallCountSvg += 1;
+    document.body.dataset.videoStallCount = String(videoStallCountSvg);
+}});
+pvSvg.addEventListener('stalled', () => {{
+    videoStallCountSvg += 1;
+    document.body.dataset.videoStallCount = String(videoStallCountSvg);
 }});
 pvSvg.addEventListener('seeking', () => {{
     anchorClockSvg(pvSvg.currentTime, false);
+    pauseStripAnimationSvg(pvSvg.currentTime);
 }});
 pvSvg.addEventListener('seeked', () => {{
     anchorClockSvg();
+    if (playingSvg) startStripAnimationSvg(pvSvg.currentTime);
     renderAllSvg(true);
 }});
 pvSvg.addEventListener('ended', pauseSvg);
@@ -2093,6 +2339,7 @@ pvSvg.addEventListener('timeupdate', () => {{
 window.addEventListener('resize', () => {{
     markerCenterSvg = null;
     seekRectSvg = null;
+    rebuildStripAnimationSvg();
     renderAllSvg(true);
 }});
 
@@ -2109,6 +2356,13 @@ window.__RHYTHM_ANALYSIS__ = {{
         segmentCount: SEGMENTS_SVG.length,
         segmentsReady: segmentsReadySvg,
         usingSegments: HAS_SEGMENTS_SVG,
+        videoPreloadState: videoPreloadStateSvg,
+        videoStreaming: pvReadySvg && !pvSvg.currentSrc.startsWith('blob:'),
+        videoStallCount: videoStallCountSvg,
+        clockMode: 'monotonic-no-mid-playback-correction',
+        scrollDriver: compositorScrollSvg
+            ? 'web-animations-compositor'
+            : 'request-animation-frame',
         videoTime: playbackTimeSvg(),
         scrollDistance: lastDistanceSvg,
     }}),
@@ -2118,6 +2372,12 @@ setRateSvg(1);
 setDelaySvg(0);
 refreshAvailabilitySvg();
 prepareSegmentsSvg();
+prepareVideoSvg().catch((error) => {{
+    console.error('video metadata:', error);
+    videoEmptySvg.title = String(error);
+    updateVideoPreloadStatusSvg(String(error), 'error');
+    refreshAvailabilitySvg();
+}});
 renderAllSvg(true);
 </script>
 </body>

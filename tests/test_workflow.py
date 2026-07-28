@@ -18,6 +18,7 @@ from mra.difficulty import (analysis_html_path, difficulty_file_stem, difficulty
                             find_preview_video, offset_file_path, preview_video_path,
                             preview_video_candidates, rhythm_png_path, rhythm_svg_path,
                             strip_svg_path)
+from mra.meter import MeterMap
 from mra.simai_parser import Chart, Note, NoteType, parse_inote
 from mra.song_library import SongFolder, discover_song_folders, safe_folder_name
 
@@ -245,6 +246,7 @@ class WorkflowTests(unittest.TestCase):
 
             self.assertEqual(result, output)
             self.assertEqual(output.read_bytes(), b"video")
+            tempdir.assert_called_once_with(prefix="mra-majdata-record-")
             close_window.assert_called_once_with(work)
             self.assertTrue(output.exists())
 
@@ -602,6 +604,41 @@ class WorkflowTests(unittest.TestCase):
         ]
         self.assertEqual(['BPM 240', 'BPM 120'], labels)
 
+    def test_bpm_and_meter_changes_at_same_beat_keep_horizontal_gap(self):
+        chart = Chart(
+            level=12,
+            designer="Tester",
+            bpm_timeline=[(0.0, 120.0), (2.0, 180.0)],
+        )
+        meter_map = MeterMap.from_dict({
+            "sections": [
+                {"start_beat": 0, "signature": "4/4"},
+                {"start_beat": 4, "signature": "3/4"},
+            ],
+        }, total_beats=8)
+
+        primitives, _ = visualize.build_primitives(
+            [], 8, 8, 120, chart, meter_map,
+        )
+        labels = {
+            primitive[3]: primitive
+            for primitive in primitives
+            if primitive[0] == 'text'
+        }
+
+        meter_label = labels['3/4']
+        bpm_label = labels['BPM 180']
+        self.assertLessEqual(
+            abs(bpm_label[2] - meter_label[2]),
+            1,
+        )
+        self.assertGreaterEqual(
+            bpm_label[1],
+            meter_label[1]
+            + visualize._change_label_width('3/4')
+            + visualize.CHANGE_LABEL_GAP,
+        )
+
     def test_measure_boundary_keeps_sixteenth_subdivision_dots(self):
         chart = Chart(level=12, designer="Tester", bpm_timeline=[(0.0, 120.0)])
         primitives, _ = visualize.build_primitives([], 8, 8, 120, chart)
@@ -647,7 +684,10 @@ class WorkflowTests(unittest.TestCase):
                 (root / f"ReMASTER{suffix}").touch()
             segment_dir = root / "outputs" / "ReMASTER" / "strip" / "segments"
             segment_dir.mkdir(parents=True, exist_ok=True)
-            for index in range(4):
+            for index in range(
+                (56 + visualize.SEGMENT_BEATS - 1)
+                // visualize.SEGMENT_BEATS
+            ):
                 (segment_dir / f"strip_seg_{index:03d}.svg").touch()
 
             with mock.patch.object(visualize, "render_strip_svg") as svg_render, \
@@ -735,11 +775,16 @@ class WorkflowTests(unittest.TestCase):
             self.assertIn('const START_DISPLAY_BEAT = 0;', html)
             self.assertIn('return { beat: START_DISPLAY_BEAT, bpm: timings[0].bpm };', html)
             self.assertIn('window.__RHYTHM_ANALYSIS__', html)
-            self.assertIn('<video id="pv" preload="auto">', html)
+            self.assertIn(
+                '<video id="pv" preload="metadata" playsinline></video>',
+                html,
+            )
+            self.assertIn('id="videoPreloadStatus"', html)
+            self.assertIn('id="videoPreloadProgress"', html)
             self.assertIn('id="localFileWarning" hidden', html)
             self.assertIn("window.location.protocol === 'file:'", html)
             self.assertIn('打开分析页面.cmd', html)
-            self.assertIn('src="../video/preview.mp4"', html)
+            self.assertIn('"src": "../video/preview.mp4"', html)
             self.assertIn('--rhythm-height: 108px;', html)
             self.assertIn('--marker-size: 52px;', html)
             self.assertIn('--marker-top: 15.4px;', html)
@@ -870,7 +915,7 @@ class WorkflowTests(unittest.TestCase):
             self.assertTrue(segment_dir.exists())
             self.assertEqual(
                 len(list(segment_dir.glob("strip_seg_*.svg"))),
-                5,
+                9,
             )
             html_dir = root / "outputs" / "ReMASTER" / "html"
             self.assertTrue((html_dir / "打开分析页面.cmd").exists())
@@ -881,6 +926,10 @@ class WorkflowTests(unittest.TestCase):
             )
             self.assertIn(
                 'self.send_header("Content-Range"',
+                (html_dir / "_open_analysis_server.py").read_text(encoding="utf-8"),
+            )
+            self.assertIn(
+                'except (BrokenPipeError, ConnectionResetError,',
                 (html_dir / "_open_analysis_server.py").read_text(encoding="utf-8"),
             )
 
@@ -969,6 +1018,10 @@ class WorkflowTests(unittest.TestCase):
             html = Path(output).read_text(encoding="utf-8")
 
             # All segments are decoded before playback and remain mounted.
+            active = html.split(
+                '<script>\n// ===== 高性能分段 SVG 播放器 =====',
+                1,
+            )[1]
             self.assertIn('function prepareSegmentsSvg()', html)
             self.assertIn('virtualStripSvg.replaceChildren(fragment);', html)
             self.assertIn("image.loading = 'eager';", html)
@@ -976,7 +1029,7 @@ class WorkflowTests(unittest.TestCase):
             self.assertIn('Promise.all(decodes)', html)
             self.assertNotIn('function updateVisibleSegmentsSvg', html)
 
-            # The hot path performs one compositor transform per display frame.
+            # The hot path is offloaded to a compositor-thread Web Animation.
             self.assertIn('function frameSvg(timestamp)', html)
             self.assertIn('rafSvg = requestAnimationFrame(frameSvg);', html)
             self.assertIn(
@@ -984,12 +1037,58 @@ class WorkflowTests(unittest.TestCase):
                 html,
             )
             self.assertIn('virtualStripSvg.style.transform = transform;', html)
+            self.assertIn('function buildStripAnimationSvg()', active)
+            self.assertIn(
+                'stripAnimationSvg = virtualStripSvg.animate(keyframes, {',
+                active,
+            )
+            self.assertIn(
+                "document.body.dataset.scrollDriver = "
+                "'web-animations-compositor';",
+                active,
+            )
             self.assertIn('const STATUS_INTERVAL_SVG_MS = 100;', html)
             self.assertIn('function playbackTimeSvg(timestamp = performance.now())', html)
             self.assertNotIn('PLAYBACK_CLOCK_SYNC_INTERVAL_MS', html.split(
                 '<script>\n// ===== 高性能分段 SVG 播放器 =====', 1
             )[1])
             self.assertIn('seekRectSvg', html)
+
+            # The PV uses native Range streaming and is never copied into a
+            # page-owned Blob; only metadata and SVG textures gate playback.
+            self.assertIn("pvSvg.preload = 'metadata';", active)
+            self.assertIn('pvSvg.src = source.src;', active)
+            self.assertNotIn('fetchWholeVideoSvg', active)
+            self.assertNotIn('response.body.getReader()', active)
+            self.assertNotIn('new Blob(', active)
+            self.assertNotIn('URL.createObjectURL', active)
+            self.assertIn(
+                'const ready = pvReadySvg && segmentsReadySvg;',
+                active,
+            )
+
+            # A decoder wait/recovery records diagnostics but never reanchors
+            # the running monotonic strip clock.
+            waiting_handler = active.split(
+                "pvSvg.addEventListener('waiting', () => {", 1
+            )[1].split('});', 1)[0]
+            self.assertNotIn('anchorClockSvg', waiting_handler)
+            playing_handler = active.split(
+                "pvSvg.addEventListener('playing', () => {", 1
+            )[1].split('});', 1)[0]
+            self.assertIn(
+                'if (playingSvg && !clockActiveSvg)',
+                playing_handler,
+            )
+            playback_clock = active.split(
+                'function playbackTimeSvg(', 1
+            )[1].split('function renderStripSvg', 1)[0]
+            self.assertNotIn('readyState < 2', playback_clock)
+            self.assertIn(
+                "document.body.dataset.clockMode = "
+                "'monotonic-no-mid-playback-correction';",
+                active,
+            )
 
     def test_strip_video_timeline_uses_chart_time_zero_and_120_fps(self):
         notes, timeline, _ = parse_inote("{4},,,,1,2,E", 120)
@@ -1104,6 +1203,22 @@ class WorkflowTests(unittest.TestCase):
         self.assertEqual(rings[0][4], visualize.SWEEP_RING_COLOR)
         self.assertTrue(all(ring[4] != visualize.SWEEP_RING_COLOR for ring in rings[1:]))
 
+    def test_sweep_accepts_sixteenth_note_staircase(self):
+        notes, timeline, _ = parse_inote("{16}1,2,3,4,5,E", 120)
+        chart = Chart(
+            level=12,
+            designer="Tester",
+            notes=notes,
+            bpm_timeline=timeline,
+        )
+        events = visualize.compute_rhythm_events(chart)
+
+        self.assertEqual(
+            [index for index, event in enumerate(events)
+             if event['is_sweep_start']],
+            [0],
+        )
+
     def test_sweep_supports_reverse_wrap_and_equivalent_48th_grid(self):
         notes, timeline, _ = parse_inote("{48}3,,2,,1,,8,,7,E", 120)
         chart = Chart(level=12, designer="Tester", notes=notes, bpm_timeline=timeline)
@@ -1133,10 +1248,62 @@ class WorkflowTests(unittest.TestCase):
                     [0],
                 )
 
+    def test_two_hand_sweep_allows_one_incidental_head_key(self):
+        notes, timeline, _ = parse_inote(
+            "{16}1/5/8,2/6,3/7,4/8,1/5,E",
+            120,
+        )
+        chart = Chart(
+            level=12,
+            designer="Tester",
+            notes=notes,
+            bpm_timeline=timeline,
+        )
+        events = visualize.compute_rhythm_events(chart)
+
+        self.assertEqual(
+            [index for index, event in enumerate(events)
+             if event['is_sweep_start']],
+            [0],
+        )
+
+    def test_two_hand_sweep_marks_shared_single_key_head(self):
+        notes, timeline, _ = parse_inote(
+            "{48}8,1/7,2/6,3/5,4,E",
+            120,
+        )
+        chart = Chart(
+            level=12,
+            designer="Tester",
+            notes=notes,
+            bpm_timeline=timeline,
+        )
+        events = visualize.compute_rhythm_events(chart)
+
+        self.assertEqual(
+            [
+                {note.button for note in event['notes']
+                 if note.note_type != NoteType.SLIDE}
+                for event in events
+            ],
+            [{8}, {1, 7}, {2, 6}, {3, 5}, {4}],
+        )
+        self.assertEqual(
+            [index for index, event in enumerate(events)
+             if event['is_sweep_start']],
+            [0],
+        )
+
+        primitives, _ = visualize.build_primitives(events, 4, 1, 120, chart)
+        rings = [primitive for primitive in primitives if primitive[0] == 'ring']
+        self.assertEqual(rings[0][4], visualize.SWEEP_RING_COLOR)
+        self.assertTrue(
+            all(ring[4] != visualize.SWEEP_RING_COLOR for ring in rings[1:])
+        )
+
     def test_sweep_rejects_slower_two_note_and_inconsistent_chord_staircases(self):
         cases = (
             "{8}1,2,3,4,5,E",
-            "{16}1,2,3,4,5,E",
             "{24}1,2,E",
             "{8}1/5,2/6,3/7,4/8,E",
             "{16}1/5,2/7,3/8,E",
@@ -1148,6 +1315,66 @@ class WorkflowTests(unittest.TestCase):
                               bpm_timeline=timeline)
                 events = visualize.compute_rhythm_events(chart)
                 self.assertFalse(any(event['is_sweep_start'] for event in events))
+
+    def test_sweep_rejects_axis_interactions(self):
+        cases = (
+            "{16}6,5,6,7,6,E",
+            "{16}3,4,3,2,3,E",
+            "{24}6,5,6,7,6,E",
+            "{24}3,4,3,2,3,E",
+        )
+        for inote in cases:
+            with self.subTest(inote=inote):
+                notes, timeline, _ = parse_inote(inote, 120)
+                chart = Chart(
+                    level=12,
+                    designer="Tester",
+                    notes=notes,
+                    bpm_timeline=timeline,
+                )
+                events = visualize.compute_rhythm_events(chart)
+                self.assertFalse(any(event['is_sweep_start'] for event in events))
+
+    def test_single_hand_sweep_is_not_remarked_at_incidental_chords(self):
+        notes, timeline, _ = parse_inote(
+            "{24}1/5,2,3,4,5,6,3/7,8,1,2,3,4,1/5,6,7,8,1,2,E",
+            120,
+        )
+        chart = Chart(
+            level=12,
+            designer="Tester",
+            notes=notes,
+            bpm_timeline=timeline,
+        )
+        events = visualize.compute_rhythm_events(chart)
+
+        self.assertEqual(
+            [index for index, event in enumerate(events)
+             if event['is_sweep_start']],
+            [0],
+        )
+
+    def test_single_hand_sweep_ignores_interleaved_isolated_taps(self):
+        notes, timeline, _ = parse_inote(
+            (
+                "{96}4/8,,,7,,,6,,,5,,,4,,,3,7,,2,,,1,,,8,,,7,,,6,,2,"
+                "5,,,4,,,3,,,2,,,1,E"
+            ),
+            120,
+        )
+        chart = Chart(
+            level=12,
+            designer="Tester",
+            notes=notes,
+            bpm_timeline=timeline,
+        )
+        events = visualize.compute_rhythm_events(chart)
+
+        self.assertEqual(
+            [index for index, event in enumerate(events)
+             if event['is_sweep_start']],
+            [0],
+        )
 
     def test_double_break_head_forms_a_sweep_and_break_color_has_priority(self):
         notes, timeline, _ = parse_inote("{24}1/5b,6,7,E", 120)
@@ -1320,8 +1547,8 @@ class WorkflowTests(unittest.TestCase):
             output = make_html.generate_html(str(root), "test", diff_id=6)
             html = Path(output).read_text(encoding="utf-8")
             self.assertLess(
-                html.index('src="../../../re.master_PREVIEW.MP4"'),
-                html.index('src="../video/preview.mp4"'),
+                html.index('"src": "../../../re.master_PREVIEW.MP4"'),
+                html.index('"src": "../video/preview.mp4"'),
             )
 
     def test_run_all_force_defaults_to_false(self):

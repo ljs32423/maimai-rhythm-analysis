@@ -1,15 +1,13 @@
 # Maimai Rhythm Analysis
 
-把 maimai 的 `maidata.txt` 谱面转成可视化的节奏分析结果：节奏图、预览视频、可交互的前端分析页面，支持人工变拍号时间轴与音频对齐。
+将 maimai 的 `maidata.txt` 生成节奏图、预览视频和可交互分析页面。
+支持变拍号、扫键头人工修正与音频对齐。
 
 ## 快速开始
 
-从项目的 [GitHub Releases](https://github.com/ljs32423/maimai-rhythm-analysis/releases)
-下载名称以 `windows-x64-full.zip` 结尾的完整包并解压。
-
-完整包自带 Python、FFmpeg/ffprobe、MajdataViewX 和全部 Python 依赖。
-解压后进入 `app`，双击 `启动节奏分析.cmd`，程序会启动本地 Web 服务并自动
-打开浏览器，不需要预先安装 Python。
+从 [GitHub Releases](https://github.com/ljs32423/maimai-rhythm-analysis/releases)
+下载 `windows-x64-full.zip`，解压后进入 `app`，双击
+`启动节奏分析.cmd`。完整包已包含 Python、FFmpeg 和 MajdataViewX。
 
 源码运行可以使用：
 
@@ -19,19 +17,11 @@ python -m pip install -r requirements.txt
 python -m mra.web_app
 ```
 
-Web 应用仅监听 `127.0.0.1`，可以扫描歌曲库、选择难度、编辑拍号和
-`maidata_sweep.txt`、查看生成进度并直接打开分析播放器。录制任务串行执行，
-避免多个 MajdataView 实例争用显卡与录制管线。
-
-原命令行工作流仍然保留：
+Web 应用仅监听本机 `127.0.0.1`。命令行也可直接运行：
 
 ```powershell
 python -m mra.run_all -d "QZKago Requiem"
 ```
-
-项目首次处理某个难度时会生成一份默认 `4/4` 的 `meter.json`，之后可以人工加入变拍节点。
-
-按上述指令运行完成后，在 `songs/QZKago Requiem/outputs/MASTER/html/analysis.html` 打开分析页面，即可查看节奏解析。
 
 ## 歌曲目录
 
@@ -64,16 +54,14 @@ python -m mra.run_all -d "曲名" -diff 5 -f   # 指定难度 + 强制覆盖
 
 ### 硬件编码
 
-程序启动后会用短视频进行真实试编码，而不是只检查编码器名称，并按以下顺序
-自动选择可用编码器：
+程序会实际试编码，并依次选择：
 
 1. NVIDIA NVENC
 2. Intel Quick Sync
 3. AMD AMF
 4. CPU `libx264`
 
-硬件转码失败时，PV 预处理和最终裁切会自动使用 `libx264` 重试。Web 设置页会
-显示每个编码器的检测结果，也可以在 `config.json` 中人工指定：
+失败时自动回退到 CPU `libx264`。可在 Web 设置页或 `config.json` 中指定：
 
 ```json
 {
@@ -87,8 +75,7 @@ python -m mra.run_all -d "曲名" -diff 5 -f   # 指定难度 + 强制覆盖
 }
 ```
 
-支持的画质档位为 `balanced`、`high` 和 `maximum`。设置修改后重启 Web 应用
-即可让 MajdataView 录制参数使用新配置。
+画质支持 `balanced`、`high`、`maximum`；修改后需重启 Web 应用。
 
 ### 分步执行
 
@@ -102,9 +89,8 @@ python -m mra.make_html   -d "曲名" -diff 5 -f # 只生成分析页面
 
 ### 变拍号与人工编辑
 
-Simai 格式没有拍号字段，首次运行时会在 `outputs/<难度>/meter/meter.json` 初始化一个 `4/4` 节点。
-
-直接编辑这个文件，在实际发生拍号变化的位置添加节点：
+首次运行会创建 `outputs/<难度>/meter/meter.json`，默认拍号为 `4/4`。
+按实际变拍位置添加节点：
 
 ```json
 {
@@ -118,17 +104,17 @@ Simai 格式没有拍号字段，首次运行时会在 `outputs/<难度>/meter/m
 }
 ```
 
-只有分母为 `4` 的拍号会按每个四分拍绘制内部弱线。
-`6/8`、`7/8`、`3/16` 等其他拍号只绘制强小节线。
-
-修改拍号后，运行 `python -m mra.visualize -d "曲名" -diff 5 -f` 即可重新生成图片。
+仅分母为 `4` 的拍号绘制四分拍弱线；其他拍号只绘制强小节线。修改后运行
+`python -m mra.visualize -d "曲名" -diff 5 -f`。
 
 ### 扫键头人工修正
 
-首次生成可视化时，程序会复制 `maidata.txt` 为歌曲目录下的
-`maidata_sweep.txt`，并在机器识别到的扫键头音符组末尾加入 `/S`。
-从此以后完全以这份人工文件为准：有 `/S` 就标记，没有就不标记。
-漏判时手动加入 `/S`，误判时直接删除已有的 `/S`。
+首次生成时会创建 `maidata_sweep.txt`。音符组末尾有 `/S` 即标记为扫键头；
+漏判时加入 `/S`，误判时删除 `/S`。
+机器识别会排除固定轴键交替出现的轴交互，例如 `6,5,6,7,6`。
+单手连续扫中途夹入另一只手的单次按键时，整段只标记最开始的扫键头。
+双手扫的起头同拍多出一个附加键时，仍标记包含真正起头的整个音符组。
+自动识别的密度门槛为连续三个外键且达到 16 分音符或更密。
 
 例如：
 
@@ -136,31 +122,27 @@ Simai 格式没有拍号字段，首次运行时会在 `outputs/<难度>/meter/m
 {32}5/7h[1:0]/S,8,1,2,3,4,
 ```
 
-人工文件不会被 `-f` 覆盖。只应增删 `/S`，不要修改其中的谱面时间结构；
-如果原始 `maidata.txt` 已变化，程序会保留人工文件并输出提示。需要重新初始化时，
-删除 `maidata_sweep.txt` 后再次运行即可。
-
-修改标记后，运行以下任一命令重建可视化：
+`-f` 不会覆盖人工文件。不要修改谱面时间结构；需要重新初始化时，删除
+`maidata_sweep.txt` 后重新运行。修改标记后执行：
 
 ```powershell
-python -m mra.run_all -d "曲名" -diff 5 -f
 python -m mra.visualize -d "曲名" -diff 5 -f
 ```
 
-网页版直接滚动分段 SVG：每段最多 16 拍，生成页面时会把所有分段提前载入、
-解码并上传给浏览器，完成预热前播放按钮保持禁用。播放期间所有分段始终挂载，
-每个显示帧只对同一个父图层写入一次 `translate3d`，避免切段时增删 DOM 或重新
-解析 SVG。这个策略会多占用内存和 GPU 纹理，但能换取更稳定的高刷新率滚动，
-同时保留矢量线条、文字和彩色外环的清晰度。
+## 播放性能
 
-PV 负责播放、暂停和拖动；节奏条位置由 `performance.now()` 单调时钟以绝对速度
-连续推进，并在播放开始、暂停和人工拖动时重新建立锚点。正常播放途中不周期性
-强制改位置，避免同步修正造成肉眼可见的顿挫。BPM、小节号和拍号状态只按
-100ms 的低频率更新，不参与每帧滚动。
+- 谱面预览视频使用 HTTP Range 按需流式读取，只预载元数据，不再整段复制到内存。
+- 8 拍 SVG 分段全部解码并上传为 GPU 纹理后才允许播放。
+- 滚动条优先由浏览器合成线程的 Web Animation 连续驱动；不支持时回退到
+  `requestAnimationFrame`。
+- 播放途中不做位置校正；视频缓冲或解码停顿不会拉停滚动条。
+
+滚动条会优先占用内存和 GPU 纹理预算以换取连续滚动。若预览视频确实发生
+缓冲或解码停顿，节奏条仍会继续运行，因此可能产生少量不同步。
 
 不要直接双击 `analysis.html`。生成器会在同目录创建 `打开分析页面.cmd`；
-双击后启动支持 HTTP Range 的本地服务，使视频可以快速预加载和远距离拖动。
-服务连续 30 分钟没有新请求后自动退出。
+请用该入口启动支持 HTTP Range 的本地服务，否则视频拖动和流式读取可能失效。
+服务闲置 30 分钟后自动退出。
 
 ## 输出结构
 
@@ -173,7 +155,7 @@ PV 负责播放、暂停和拖动；节奏条位置由 `performance.now()` 单�
 ├── meter/meter.json        # 仅含人工维护的拍号变化节点
 ├── rhythm/rhythm.{png,svg} # 节奏图
 ├── strip/strip.svg         # 滚动条矢量素材
-└── strip/segments/*.svg    # 网页预热并连续滚动的 16 拍分段
+└── strip/segments/*.svg    # 网页预热并连续滚动的 8 拍分段
 ```
 
 Re:MASTER 对应 `outputs/ReMASTER/`。

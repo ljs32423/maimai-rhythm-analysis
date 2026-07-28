@@ -19,6 +19,7 @@ maimai 谱面节奏可视化 v2 — ArcaeaRhythmAnalysis 风格
 import sys, os, math, argparse, html
 from collections import Counter
 from fractions import Fraction
+from itertools import combinations
 from pathlib import Path
 
 import numpy as np
@@ -113,8 +114,8 @@ RUN_INFERENCE_QUINTUPLET_MAX_REL_SPREAD = 0.26
 RUN_INFERENCE_QUINTUPLET_MAX_PHASE_ERROR = 0.22
 RUN_INFERENCE_MAX_NORMALIZED_BEATS = 1.0
 SWEEP_MIN_NOTES = 3
-SWEEP_MAX_INTERVAL_BEATS = 4 / 24  # 24分音符，或更密
-SWEEP_TWO_HAND_MAX_INTERVAL_BEATS = 4 / 16  # 双手各扫一键时，16分双押等效为32分密度
+SWEEP_MAX_INTERVAL_BEATS = 4 / 16  # 16分音符，或更密
+SWEEP_TWO_HAND_MAX_INTERVAL_BEATS = 4 / 16
 SWEEP_INTERVAL_TOLERANCE = 1e-6
 
 
@@ -421,8 +422,9 @@ def _advance_outer_button(button: int, direction: int) -> int:
 def _two_hand_sweep_end(events, index: int) -> int | None:
     """Return the last event of two simultaneous outer-key sweeps.
 
-    The two hands are tracked independently, so parallel sweeps and
-    converging/diverging sweeps are both accepted.
+    The two hands are tracked independently, so parallel sweeps,
+    converging/diverging sweeps, and a shared single-key start/end are
+    accepted.
     """
     if index + 2 >= len(events):
         return None
@@ -431,17 +433,32 @@ def _two_hand_sweep_end(events, index: int) -> int | None:
 
     head = tuple(sorted(_event_outer_buttons(events[index])))
     following = tuple(sorted(_event_outer_buttons(events[index + 1])))
-    if len(head) != 2 or len(following) != 2:
+    if len(following) != 2 or not 1 <= len(head) <= 3:
         return None
 
     states: list[tuple[tuple[int, int], tuple[int, int]]] = []
-    for assigned_following in (following, (following[1], following[0])):
+    if len(head) == 1:
+        # One key can split into two simultaneous sweeps when the next chord
+        # presses its immediate clockwise and counter-clockwise neighbours.
         directions = tuple(
-            _outer_button_direction(current, next_button)
-            for current, next_button in zip(head, assigned_following)
+            _outer_button_direction(head[0], next_button)
+            for next_button in following
         )
-        if all(directions):
-            states.append((assigned_following, directions))
+        if set(directions) == {-1, 1}:
+            states.append((following, directions))
+    else:
+        # A two-hand sweep may start inside a three-note chord.  In that case
+        # select the two moving head buttons and treat the third as an
+        # incidental same-beat tap.
+        for moving_head in combinations(head, 2):
+            for assigned_following in (following, (following[1], following[0])):
+                directions = tuple(
+                    _outer_button_direction(current, next_button)
+                    for current, next_button
+                    in zip(moving_head, assigned_following)
+                )
+                if all(directions):
+                    states.append((assigned_following, directions))
     if not states:
         return None
 
@@ -450,22 +467,127 @@ def _two_hand_sweep_end(events, index: int) -> int | None:
         if not _is_dense_two_hand_sweep_gap(events, end, end + 1):
             break
         next_buttons = _event_outer_buttons(events[end + 1])
-        if len(next_buttons) != 2:
+        if len(next_buttons) not in (1, 2):
             break
         next_states = []
+        converged = False
         for positions, directions in states:
             expected = tuple(
                 _advance_outer_button(button, direction)
                 for button, direction in zip(positions, directions)
             )
-            if len(set(expected)) == 2 and set(expected) == next_buttons:
+            expected_buttons = set(expected)
+            if (len(next_buttons) == 2
+                    and len(expected_buttons) == 2
+                    and expected_buttons == next_buttons):
                 next_states.append((expected, directions))
+            elif (len(next_buttons) == 1
+                  and len(expected_buttons) == 1
+                  and expected_buttons == next_buttons):
+                converged = True
+        if converged:
+            end += 1
+            break
         if not next_states:
             break
         states = next_states
         end += 1
 
     return end if end - index + 1 >= SWEEP_MIN_NOTES else None
+
+
+def _is_axis_interaction(events, start: int, end: int) -> bool:
+    """Return whether a three-key staircase is embedded in an axis pattern.
+
+    Example: 6,5,6,7,6.  The repeated 6 is the axis; 5,6,7 must not be
+    interpreted as a sweep merely because those middle three keys are
+    consecutive.
+    """
+    if end - start + 1 != SWEEP_MIN_NOTES:
+        return False
+    if start == 0 or end + 1 >= len(events):
+        return False
+    if not all(
+        _is_dense_sweep_gap(events, left, left + 1)
+        for left in range(start - 1, end + 1)
+    ):
+        return False
+
+    previous = _event_single_outer_button(events[start - 1])
+    middle = _event_single_outer_button(events[start + 1])
+    following = _event_single_outer_button(events[end + 1])
+    return previous is not None and previous == middle == following
+
+
+def _single_hand_path_continues(events, start: int, target: int,
+                                direction: int) -> bool:
+    """Whether one moving hand reaches a later chord without stopping.
+
+    Chords may add one stationary-hand tap, but every event must still contain
+    the next outer key of the original sweep.
+    """
+    if target <= start:
+        return False
+    if _two_hand_sweep_end(events, target) is not None:
+        return False
+
+    second = _event_single_outer_button(events[start + 1])
+    if second is None:
+        return False
+    moving_button = _advance_outer_button(second, -direction)
+    if moving_button not in _event_outer_buttons(events[start]):
+        return False
+
+    last_moving_index = start
+    incidental_count = 0
+    for index in range(start + 1, target + 1):
+        buttons = _event_outer_buttons(events[index])
+        if not 1 <= len(buttons) <= 2:
+            return False
+        expected = _advance_outer_button(moving_button, direction)
+        moving_gap = (
+            events[index]['beat'] - events[last_moving_index]['beat']
+        )
+        if expected in buttons:
+            if not (
+                SWEEP_INTERVAL_TOLERANCE < moving_gap
+                <= SWEEP_MAX_INTERVAL_BEATS + SWEEP_INTERVAL_TOLERANCE
+            ):
+                return False
+            moving_button = expected
+            last_moving_index = index
+            incidental_count = 0
+            continue
+
+        # The other hand may add one isolated tap between two steps of the
+        # moving hand.  It must not itself form a second moving sequence.
+        incidental_count += 1
+        if (index == target or len(buttons) != 1 or incidental_count > 1
+                or moving_gap >=
+                SWEEP_MAX_INTERVAL_BEATS + SWEEP_INTERVAL_TOLERANCE):
+            return False
+    return True
+
+
+def _suppress_mid_sweep_chord_heads(events) -> None:
+    """Keep only the first head while one hand sweeps through extra taps."""
+    active_start = None
+    active_direction = 0
+    for index, event in enumerate(events):
+        if not event.get('is_sweep_start'):
+            continue
+        direction = _sweep_start_direction(events, index)
+        if direction == 0:
+            continue
+        if (active_start is not None
+                and direction == active_direction
+                and _single_hand_path_continues(
+                    events, active_start, index, direction,
+                )):
+            event['is_sweep_start'] = False
+            continue
+        active_start = index
+        active_direction = direction
 
 
 def _mark_two_hand_sweep_starts(events) -> None:
@@ -495,11 +617,13 @@ def _mark_sweep_starts(events) -> None:
         while end + 1 < len(events) and _sweep_step(events, end, end + 1) == direction:
             end += 1
 
-        if end - index + 1 >= SWEEP_MIN_NOTES:
+        if (end - index + 1 >= SWEEP_MIN_NOTES
+                and not _is_axis_interaction(events, index, end)):
             events[index]['is_sweep_start'] = True
 
         # The last note can also be the turning point of a sweep in the other direction.
         index = end
+    _suppress_mid_sweep_chord_heads(events)
     _mark_two_hand_sweep_starts(events)
 
 
@@ -588,7 +712,7 @@ def ensure_sweep_maidata_for_song(song_dir: str | Path,
 # 采用"每拍固定像素"映射，变速不变距。
 PX_PER_BEAT = 108         # 每拍像素宽度 (16分间距=27px，与节奏点外径相切)
 PAD_X = 320               # 左侧额外预留空带，避免前端初始对齐时露出容器黑底
-SEGMENT_BEATS = 16        # 控制单段 GPU 纹理宽度；更多小段换取更稳定的高刷滚动
+SEGMENT_BEATS = 8         # 控制 GPU 纹理宽度；在高 DPI 屏上也避免超大纹理分块卡顿
 NOTE_R = 11.5             # 节奏点填充半径；外环与填充之间保留 1px 黑色间隔
 NOTE_RING_GAP = 1.0       # 节奏点填充与外环之间的黑色间隔
 NOTE_RING_W = 1.0         # 节奏点外环宽度（不影响终点空心圆）
@@ -607,6 +731,10 @@ LABEL_CY = NOTE_AREA_H + LABEL_GAP + LABEL_AREA_H / 2  # 标注区中心 Y
 ROW_BEATS_DEFAULT = 32    # 默认每行拍数 (8小节=32拍，便于折叠查看)
 BEATS_PER_MEASURE = 4     # 兼容常量；实际小节长度由 MeterMap 决定
 LONG_IMAGE_EXTRA_MEASURES = 12  # 长条图额外留白的小节数
+METER_CHANGE_LABEL_Y = 7
+BPM_CHANGE_LABEL_Y = 8
+CHANGE_LABEL_FONT_SIZE = 5.2
+CHANGE_LABEL_GAP = 4.0
 
 # 音符合并优先级 (多押时取最重要的作为代表)
 TYPE_PRIORITY = {
@@ -622,6 +750,11 @@ def row_width_px(row_beats: int) -> int:
 
 def beat_to_x_in_row(beat_in_row: float) -> float:
     return PAD_X + beat_in_row * PX_PER_BEAT
+
+
+def _change_label_width(text: str) -> float:
+    """Conservative width estimate for short bold meter/BPM labels."""
+    return len(text) * CHANGE_LABEL_FONT_SIZE * 0.7
 
 
 def star_path(cx, cy, r):
@@ -749,6 +882,15 @@ def build_primitives(events, row_beats, total_beats, bpm, chart, meter_map=None)
     W_row = row_width_px(row_beats)
     right_edge = PAD_X + row_beats * PX_PER_BEAT  # 网格右边界
     label_sizes = _fit_label_font_sizes(events)
+    meter_change_labels = [
+        (measure.start_beat, measure.signature.label)
+        for index, measure in enumerate(meter_map.measures)
+        if index == 0 or meter_map.measures[index - 1].signature != measure.signature
+    ]
+    meter_changes_by_beat = {
+        round(start_beat, 6): signature
+        for start_beat, signature in meter_change_labels
+    }
 
     for row in range(n_rows):
         y0 = row * ROW_H
@@ -788,17 +930,16 @@ def build_primitives(events, row_beats, total_beats, bpm, chart, meter_map=None)
                 prims.append(('dot', x, y0 + NOTE_CY, 0.8, '#666666'))
 
         # 只在开头和拍号变化处标注，避免每小节重复文字。
-        visible_measures = [measure for measure in meter_map.measures
-                            if grid_start - 1e-6 <= measure.start_beat <= grid_end + 1e-6]
-        for measure in visible_measures:
-            index = meter_map.measures.index(measure)
-            changed = (index == 0 or
-                       meter_map.measures[index - 1].signature != measure.signature)
-            if changed:
-                x = beat_to_x_in_row(measure.start_beat - b0)
-                if 0 <= x <= right_edge:
-                    prims.append(('text', x + 3, y0 + 7, measure.signature.label,
-                                  '#8bd5ff', 5.2, 'bold', 'normal', 'start'))
+        for start_beat, signature in meter_change_labels:
+            if not grid_start - 1e-6 <= start_beat <= grid_end + 1e-6:
+                continue
+            x = beat_to_x_in_row(start_beat - b0)
+            if 0 <= x <= right_edge:
+                prims.append((
+                    'text', x + 3, y0 + METER_CHANGE_LABEL_Y, signature,
+                    '#8bd5ff', CHANGE_LABEL_FONT_SIZE,
+                    'bold', 'normal', 'start',
+                ))
         # 行分隔线
         if row < n_rows - 1:
             prims.append(('line', 0, y0 + ROW_H - ROW_GAP / 2,
@@ -818,9 +959,19 @@ def build_primitives(events, row_beats, total_beats, bpm, chart, meter_map=None)
         x = beat_to_x_in_row(beat_in_row)
         y0 = row * ROW_H
         bpm_text = f'BPM {change_bpm:g}'
+        label_x = x + 2
+        simultaneous_meter = meter_changes_by_beat.get(round(change_beat, 6))
+        if simultaneous_meter is not None:
+            label_x = (
+                x + 3 + _change_label_width(simultaneous_meter)
+                + CHANGE_LABEL_GAP
+            )
         prims.append(('line', x, y0 + 1, x, y0 + NOTE_AREA_H - 1, '#ffd54f', 1.2))
-        prims.append(('text', x + 2, y0 + 8, bpm_text, '#ffd54f', 5.2,
-                      'bold', 'normal', 'start'))
+        prims.append((
+            'text', label_x, y0 + BPM_CHANGE_LABEL_Y, bpm_text,
+            '#ffd54f', CHANGE_LABEL_FONT_SIZE,
+            'bold', 'normal', 'start',
+        ))
 
     # 音符 (多押合并为单个圆点, 全部统一为 tap 样式, 不区分类型, 不画横条)
     # 行末音符 (恰在行边界 beat 近似为 row_beats 整数倍) 在两处绘制:
