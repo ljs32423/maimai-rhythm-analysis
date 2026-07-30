@@ -85,9 +85,15 @@ function renderSongs() {
     ? `已显示 ${visible.length} / ${songs.length} 首`
     : `${songs.length} 首`;
   $("loadMoreButton").classList.toggle("hidden", visible.length >= songs.length);
+  if (!songs.length) {
+    $("songGrid").innerHTML = `<div class="empty-state panel">${
+      query ? `没有匹配「${escapeHtml($("searchInput").value.trim())}」的歌曲` : "歌曲库为空"
+    }</div>`;
+    return;
+  }
   $("songGrid").innerHTML = visible.map(song => `
     <article class="song-card panel" data-song="${encodeURIComponent(song.id)}">
-      ${song.cover_url ? `<img class="song-cover" src="${song.cover_url}" alt="">` : ""}
+      ${song.cover_url ? `<img class="song-cover" src="${song.cover_url}" loading="lazy" decoding="async" alt="">` : ""}
       <div class="song-content">
         <h3 class="song-title">${escapeHtml(song.title)}</h3>
         <p class="song-artist">${escapeHtml(song.artist || "未知艺术家")}</p>
@@ -100,14 +106,23 @@ function renderSongs() {
       </div>
     </article>
   `).join("");
-  document.querySelectorAll(".song-card").forEach(card => {
-    card.addEventListener("click", () => {
-      const id = decodeURIComponent(card.dataset.song);
-      // 再次点击当前打开的歌曲时保持已选难度
-      const keep = state.activeSong && state.activeSong.id === id ? state.difficulty : null;
-      guard(openSong)(id, keep);
-    });
-  });
+}
+
+function renderSongSkeletons() {
+  $("songCount").textContent = "正在加载歌曲…";
+  $("loadMoreButton").classList.add("hidden");
+  $("songGrid").innerHTML = Array.from({length: 12}, () =>
+    `<article class="song-card panel skeleton" aria-hidden="true"></article>`
+  ).join("");
+}
+
+function renderSongError(message) {
+  $("songCount").textContent = "加载失败";
+  $("songGrid").innerHTML = `<div class="empty-state panel">
+    <p>歌曲库加载失败：${escapeHtml(message)}</p>
+    <button id="retryLoadButton" class="secondary">重试</button>
+  </div>`;
+  $("retryLoadButton").addEventListener("click", guard(loadSongs));
 }
 
 function escapeHtml(value) {
@@ -117,15 +132,36 @@ function escapeHtml(value) {
 }
 
 async function loadSongs() {
-  const data = await api("/api/songs");
-  state.songs = data.songs;
-  renderSongs();
+  renderSongSkeletons();
+  try {
+    const data = await api("/api/songs");
+    state.songs = data.songs;
+    renderSongs();
+  } catch (error) {
+    renderSongError(error.message);
+    throw error;
+  }
 }
 
 function highlightTab(difficulty) {
   document.querySelectorAll("#difficultyTabs button").forEach(button => {
     button.classList.toggle("active", Number(button.dataset.difficulty) === difficulty);
   });
+}
+
+// 根据当前歌曲与难度刷新“打开分析页面”链接；任务完成重新加载后走早退分支时也必须调用
+function updateAnalysisLink() {
+  if (!state.activeSong || !state.difficulty) return;
+  const diff = state.activeSong.difficulties.find(item => item.id === state.difficulty);
+  const songId = encodeURIComponent(state.activeSong.id);
+  if (diff && diff.outputs.analysis) {
+    $("analysisLink").href = `/library/${songId}/outputs/${state.difficulty === 6 ? "ReMASTER" :
+      diff.name}/html/analysis.html`;
+    $("analysisLink").classList.remove("disabled");
+  } else {
+    $("analysisLink").removeAttribute("href");
+    $("analysisLink").classList.add("disabled");
+  }
 }
 
 async function openSong(songId, preferredDifficulty = null) {
@@ -136,9 +172,14 @@ async function openSong(songId, preferredDifficulty = null) {
   state.activeSong = await api(`/api/songs/${encodeURIComponent(songId)}`);
   $("workspaceTitle").textContent = `${state.activeSong.title} · ${state.activeSong.artist || ""}`;
   $("workspace").classList.remove("hidden");
-  $("difficultyTabs").innerHTML = state.activeSong.difficulties.map(diff =>
-    `<button data-difficulty="${diff.id}">${diff.name} · Lv.${escapeHtml(diff.level)}</button>`
-  ).join("");
+  $("difficultyTabs").innerHTML = state.activeSong.difficulties.map(diff => {
+    const status = diff.outputs.analysis ? "ready" : (diff.outputs.directory ? "partial" : "none");
+    const tip = diff.outputs.analysis ? "已有分析页面"
+      : diff.outputs.directory ? "已有部分产物，未生成分析页面"
+      : "尚未生成产物";
+    return `<button data-difficulty="${diff.id}" title="${tip}">` +
+      `<span class="dot dot-${status}" aria-hidden="true"></span>${diff.name} · Lv.${escapeHtml(diff.level)}</button>`;
+  }).join("");
   document.querySelectorAll("#difficultyTabs button").forEach(button => {
     button.addEventListener("click", () => selectDifficulty(Number(button.dataset.difficulty)));
   });
@@ -154,8 +195,9 @@ async function openSong(songId, preferredDifficulty = null) {
 async function selectDifficulty(difficulty) {
   if (!state.activeSong) return;
   if (state.difficulty === difficulty) {
-    // openSong 重建 Tab 后会走到这里，只需恢复高亮
+    // openSong 重建 Tab 后会走到这里：恢复高亮，同时刷新分析链接状态
     highlightTab(difficulty);
+    updateAnalysisLink();
     return;
   }
   if (!confirmDiscardChanges()) return;
@@ -172,14 +214,7 @@ async function selectDifficulty(difficulty) {
     markSaved("meter", meterText);
     markSaved("sweep", sweep.content);
     highlightTab(difficulty);
-    const diff = state.activeSong.difficulties.find(item => item.id === difficulty);
-    if (diff.outputs.analysis) {
-      $("analysisLink").href = `/library/${songId}/outputs/${difficulty === 6 ? "ReMASTER" :
-        diff.name}/html/analysis.html`;
-    } else {
-      $("analysisLink").removeAttribute("href");
-    }
-    $("analysisLink").classList.toggle("disabled", !diff.outputs.analysis);
+    updateAnalysisLink();
   } catch (error) {
     // 失败时回退 Tab 高亮，保持界面与编辑器内容一致
     highlightTab(state.difficulty);
@@ -325,13 +360,26 @@ async function loadSystem(refresh = false) {
 }
 
 function bind() {
+  let searchTimer = null;
   $("searchInput").addEventListener("input", () => {
-    state.visibleSongs = 120;
-    renderSongs();
+    clearTimeout(searchTimer);
+    searchTimer = setTimeout(() => {
+      state.visibleSongs = 120;
+      renderSongs();
+    }, 150);
   });
   $("loadMoreButton").addEventListener("click", () => {
     state.visibleSongs += 120;
     renderSongs();
+  });
+  // 事件委托：一次绑定，重渲染后无需重复挂监听
+  $("songGrid").addEventListener("click", event => {
+    const card = event.target.closest(".song-card");
+    if (!card || card.classList.contains("skeleton")) return;
+    const id = decodeURIComponent(card.dataset.song);
+    // 再次点击当前打开的歌曲时保持已选难度
+    const keep = state.activeSong && state.activeSong.id === id ? state.difficulty : null;
+    guard(openSong)(id, keep);
   });
   $("refreshButton").addEventListener("click", guard(loadSongs));
   $("settingsButton").addEventListener("click", () => $("settingsPanel").classList.toggle("hidden"));
@@ -346,6 +394,16 @@ function bind() {
   $("cancelButton").addEventListener("click", guard(cancelJob));
   $("meterEditor").addEventListener("input", () => updateDirty("meter"));
   $("sweepEditor").addEventListener("input", () => updateDirty("sweep"));
+  document.addEventListener("keydown", event => {
+    if (event.key !== "Escape") return;
+    // 优先关闭设置面板，其次关闭工作区（有未保存修改时先确认）
+    if (!$("settingsPanel").classList.contains("hidden")) {
+      $("settingsPanel").classList.add("hidden");
+      return;
+    }
+    if ($("workspace").classList.contains("hidden")) return;
+    if (confirmDiscardChanges()) $("workspace").classList.add("hidden");
+  });
   window.addEventListener("beforeunload", event => {
     if (state.dirty.meter || state.dirty.sweep) {
       event.preventDefault();

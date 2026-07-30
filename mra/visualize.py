@@ -713,6 +713,11 @@ def ensure_sweep_maidata_for_song(song_dir: str | Path,
 PX_PER_BEAT = 108         # 每拍像素宽度 (16分间距=27px，与节奏点外径相切)
 PAD_X = 320               # 左侧额外预留空带，避免前端初始对齐时露出容器黑底
 SEGMENT_BEATS = 8         # 控制 GPU 纹理宽度；在高 DPI 屏上也避免超大纹理分块卡顿
+# 分段右侧内容出血宽度：相邻两段绘制完全相同的 2px 重叠内容，
+# 覆盖各自边缘的半透明抗锯齿像素，消除拼接处的亮缝。
+STRIP_SEGMENT_BLEED_PX = 2
+# 分段 SVG 格式标记：前端据此识别旧格式分段并自动重建。
+STRIP_SEGMENT_MARKER = "<!-- mra-strip-seg:v2 -->"
 NOTE_R = 11.5             # 节奏点填充半径；外环与填充之间保留 1px 黑色间隔
 NOTE_RING_GAP = 1.0       # 节奏点填充与外环之间的黑色间隔
 NOTE_RING_W = 1.0         # 节奏点外环宽度（不影响终点空心圆）
@@ -1186,11 +1191,16 @@ def render_strip_svg_segments(events, total_beats, bpm, chart, base_path,
         else:
             x0 = content_start + index * segment_width
             x1 = min(full_width, content_start + (index + 1) * segment_width)
+        if index < segment_count - 1:
+            # 非末段向右多画 2px：与下一段开头完全相同的重叠内容，
+            # 让浏览器合成时边缘半透明像素被同内容覆盖，避免拼接亮缝。
+            x1 = min(full_width, x1 + STRIP_SEGMENT_BLEED_PX)
         width = max(1, x1 - x0)
         out_path = f'{base_path}_seg_{index:03d}.svg'
         parts = [
             f'<svg xmlns="http://www.w3.org/2000/svg" width="{width}" height="{height}" '
-            f'viewBox="{x0} 0 {width} {height}" font-family="{SVG_TEXT_FONT_STACK}">'
+            f'viewBox="{x0} 0 {width} {height}" font-family="{SVG_TEXT_FONT_STACK}">',
+            STRIP_SEGMENT_MARKER,
         ]
         parts.append(f'<rect x="{x0:.2f}" y="0" width="{width:.2f}" height="{height:.2f}" fill="#0a0a14"/>')
         for p in prims:

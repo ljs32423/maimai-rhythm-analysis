@@ -22,6 +22,7 @@ from .meter import load_meter_map
 from .visualize import (compute_rhythm_events, PX_PER_BEAT, PAD_X,
                         NOTE_AREA_H, LABEL_GAP, LABEL_AREA_H, NOTE_CY,
                         NOTE_OUTER_DIAMETER, SEGMENT_BEATS,
+                        STRIP_SEGMENT_BLEED_PX, STRIP_SEGMENT_MARKER,
                         ensure_sweep_maidata_for_song,
                         render_strip_svg_segments)
 from .difficulty import (DIFFICULTY_NAMES, analysis_html_path, default_target_difficulties,
@@ -35,7 +36,7 @@ from .sweep_marks import apply_sweep_maidata
 # Arcaea 常量 (与 4.py 完全一致)
 # 降低滚动条整体缩放，等价于降低屏幕上“每拍经过的像素数”，从而减慢观感滚动速度。
 SVG_SCALE = 1.8
-PLAYER_RENDERER_VERSION = 9
+PLAYER_RENDERER_VERSION = 10
 
 
 ANALYSIS_SERVER_SCRIPT = r'''#!/usr/bin/env python3
@@ -327,9 +328,19 @@ def generate_html(song_dir, song_id, diff_id=5, offset=0.0):
     )
 
     def segments_are_complete(found):
-        return [index for index, _name in found] == list(
+        if [index for index, _name in found] != list(
             range(expected_segment_count)
-        )
+        ):
+            return False
+        if not found:
+            return True
+        # 旧格式分段没有内容出血，拼接处会出现亮缝：按标记识别并重建。
+        try:
+            with open(segment_dir / found[0][1], 'r', encoding='utf-8') as f:
+                head = f.read(400)
+        except OSError:
+            return False
+        return STRIP_SEGMENT_MARKER in head
 
     segment_dir = modern_segment_dir
     found_segments = find_segments(segment_dir, modern_segment_re)
@@ -360,13 +371,18 @@ def generate_html(song_dir, song_id, diff_id=5, offset=0.0):
 
     segments_js = []
     if segments_are_complete(found_segments):
-        for index, name in found_segments:
+        last_position = len(found_segments) - 1
+        for position, (index, name) in enumerate(found_segments):
             if index == 0:
                 x = 0
                 width = min(svg_w, PAD_X + segment_width)
             else:
                 x = PAD_X + index * segment_width
                 width = min(segment_width, max(1, svg_w - x))
+            if position < last_position:
+                # 与生成端的内容出血保持一致：相邻分段重叠 2px 相同内容，
+                # 覆盖边缘抗锯齿半透明像素，消除滚动时的拼接亮缝。
+                width = min(width + STRIP_SEGMENT_BLEED_PX, max(1, svg_w - x))
             segments_js.append({
                 'src': asset_url(segment_dir / name),
                 'x': round(x, 3),
@@ -578,6 +594,9 @@ body {{
     user-select: none;
     image-rendering: auto;
     contain: strict;
+    /* 整条滚动条可达数万像素宽。让远离视口的分段跳过渲染，把光栅与
+       GPU 纹理压力限制在视口附近，避免播放途中出现分块光栅卡顿。 */
+    content-visibility: auto;
 }}
 .left-pentagon {{
     position: absolute; top: 0; width: var(--pentagon-width); height: var(--rhythm-height);
