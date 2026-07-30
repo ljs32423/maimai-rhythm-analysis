@@ -264,13 +264,8 @@ def parse_level_text(level_text: str) -> str:
     return text or '0'
 
 
-def parse_maidata(filepath: str) -> SongData:
-    """
-    解析 maidata.txt 文件 → SongData。
-    读取头部字段 → 按难度解析 inote → 组装完成。
-    """
-    with open(filepath, 'r', encoding='utf-8') as f:
-        content = f.read()
+def parse_maidata_content(content: str) -> SongData:
+    """直接解析 maidata 文本内容，不创建中间文件。"""
     song = SongData(
         title=extract_line(content, 'title'),
         artist=extract_line(content, 'artist'),
@@ -290,6 +285,15 @@ def parse_maidata(filepath: str) -> SongData:
         chart.notes, chart.bpm_timeline, chart.init_division = parse_inote(inote_s, song.bpm)
         song.charts[did] = chart
     return song
+
+
+def parse_maidata(filepath: str) -> SongData:
+    """
+    解析 maidata.txt 文件 → SongData。
+    读取头部字段 → 按难度解析 inote → 组装完成。
+    """
+    with open(filepath, 'r', encoding='utf-8') as f:
+        return parse_maidata_content(f.read())
 
 
 # ============ inote 主解析 ============

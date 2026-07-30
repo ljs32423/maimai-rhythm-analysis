@@ -1,3 +1,4 @@
+import errno
 import json
 import os
 import tempfile
@@ -8,6 +9,7 @@ from unittest import mock
 from fastapi import HTTPException
 from fastapi.testclient import TestClient
 
+from mra.simai_parser import parse_maidata_content
 from mra.web_app import _atomic_text, _safe_song, create_app
 
 
@@ -61,10 +63,15 @@ class WebAppTests(unittest.TestCase):
 
     def test_sweep_file_is_validated_and_saved(self):
         marked = MAIDATA.replace("1,2,3,E", "1/S,2,3,E")
-        response = self.client.put(
-            "/api/songs/Web%20Test/sweep", json={"content": marked},
-        )
+        with mock.patch(
+            "mra.web_app.parse_maidata_content",
+            wraps=parse_maidata_content,
+        ) as parse_content:
+            response = self.client.put(
+                "/api/songs/Web%20Test/sweep", json={"content": marked},
+            )
         self.assertEqual(response.status_code, 200)
+        parse_content.assert_called_once_with(marked)
         self.assertEqual(response.json()["markers"], 1)
         self.assertEqual(
             self.client.get("/api/songs/Web%20Test/sweep").json()["content"],
@@ -113,6 +120,48 @@ class WebAppTests(unittest.TestCase):
             with self.assertRaises(OSError) as context:
                 _atomic_text(self.root / "dummy.txt", "x")
         self.assertIn("replace failure", str(context.exception))
+
+    def test_atomic_text_retries_transient_replace_lock(self):
+        target = self.root / "retry.txt"
+        real_replace = os.replace
+        attempts = 0
+
+        def flaky_replace(source, destination):
+            nonlocal attempts
+            attempts += 1
+            if attempts < 3:
+                raise PermissionError(errno.EACCES, "simulated file lock")
+            return real_replace(source, destination)
+
+        with mock.patch("mra.web_app.os.replace", flaky_replace):
+            _atomic_text(target, "saved", backup=False)
+
+        self.assertEqual(attempts, 3)
+        self.assertEqual(target.read_text(encoding="utf-8"), "saved")
+
+    def test_atomic_text_does_not_reuse_legacy_pid_temp_file(self):
+        target = self.root / "fresh.txt"
+        legacy_temp = target.with_name(f".{target.name}.{os.getpid()}.tmp")
+        legacy_temp.write_text("orphaned", encoding="utf-8")
+
+        _atomic_text(target, "saved", backup=False)
+
+        self.assertEqual(target.read_text(encoding="utf-8"), "saved")
+        self.assertEqual(legacy_temp.read_text(encoding="utf-8"), "orphaned")
+
+    def test_sweep_write_error_returns_actionable_status(self):
+        marked = MAIDATA.replace("1,2,3,E", "1/S,2,3,E")
+        with mock.patch(
+            "mra.web_app._atomic_text",
+            side_effect=PermissionError(errno.EACCES, "simulated file lock"),
+        ):
+            response = self.client.put(
+                "/api/songs/Web%20Test/sweep", json={"content": marked},
+            )
+
+        self.assertEqual(response.status_code, 503)
+        self.assertIn("请稍后重试", response.json()["detail"])
+        self.assertFalse((self.song / "maidata_sweep.txt").exists())
 
     def test_invalid_meter_is_rejected_without_overwriting(self):
         response = self.client.put(

@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import argparse
+import errno
 import hashlib
 import json
 import os
@@ -16,7 +17,7 @@ import urllib.parse
 import urllib.request
 import webbrowser
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable, TypeVar
 
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, StreamingResponse
@@ -31,7 +32,7 @@ from .difficulty import (DIFFICULTY_NAMES, analysis_html_path,
                          sweep_maidata_path)
 from .ffmpeg_capabilities import detect_capabilities, find_binary
 from .meter import MeterMap
-from .simai_parser import parse_maidata
+from .simai_parser import parse_maidata, parse_maidata_content
 from .song_library import PROJECT_ROOT
 from .sweep_marks import strip_sweep_markers
 from .web_jobs import JobManager
@@ -39,6 +40,7 @@ from .web_jobs import JobManager
 
 WEB_ROOT = Path(__file__).resolve().parent / "web"
 INSTANCE_FILE = PROJECT_ROOT / ".mra-web-instance.json"
+_T = TypeVar("_T")
 
 
 class JobRequest(BaseModel):
@@ -70,14 +72,38 @@ def _cleanup_temp_file(path: Path | None) -> None:
         pass
 
 
+def _is_retryable_file_error(exc: OSError) -> bool:
+    """Windows 杀毒/索引器短暂占用文件时允许重试，其余错误立即上抛。"""
+    return (
+        getattr(exc, "winerror", None) in {5, 32, 33}
+        or exc.errno in {errno.EACCES, errno.EBUSY, errno.EPERM}
+    )
+
+
+def _retry_file_operation(operation: Callable[[], _T]) -> _T:
+    delays = (0.05, 0.1, 0.2, 0.4, 0.8)
+    for attempt in range(len(delays) + 1):
+        try:
+            return operation()
+        except OSError as exc:
+            if attempt == len(delays) or not _is_retryable_file_error(exc):
+                raise
+            time.sleep(delays[attempt])
+
+
 def _atomic_text(path: Path, content: str, *, backup: bool = True) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     if backup and path.is_file():
-        shutil.copy2(path, path.with_suffix(path.suffix + ".bak"))
-    temporary = path.with_name(f".{path.name}.{os.getpid()}.tmp")
+        backup_path = path.with_suffix(path.suffix + ".bak")
+        _retry_file_operation(lambda: shutil.copy2(path, backup_path))
+    handle, name = tempfile.mkstemp(
+        prefix=f".{path.name}.", suffix=".tmp", dir=path.parent,
+    )
+    temporary = Path(name)
     try:
-        temporary.write_text(content, encoding="utf-8")
-        os.replace(temporary, path)
+        with os.fdopen(handle, "w", encoding="utf-8") as stream:
+            stream.write(content)
+        _retry_file_operation(lambda: os.replace(temporary, path))
     finally:
         _cleanup_temp_file(temporary)
 
@@ -369,22 +395,19 @@ def create_app(
                 status_code=422,
                 detail="只能增删 /S 标记，不能在此处修改谱面时间结构",
             )
-        temporary: Path | None = None
         try:
-            handle, name = tempfile.mkstemp(
-                prefix=".maidata_sweep.", suffix=".txt", dir=song_dir,
-            )
-            os.close(handle)
-            temporary = Path(name)
-            temporary.write_text(payload.content, encoding="utf-8")
-            parsed = parse_maidata(str(temporary))
+            parsed = parse_maidata_content(payload.content)
             if not parsed.charts:
                 raise ValueError("文件中没有可用谱面")
         except Exception as exc:
             raise HTTPException(status_code=422, detail=f"扫键标记文件无效: {exc}") from exc
-        finally:
-            _cleanup_temp_file(temporary)
-        _atomic_text(path, payload.content)
+        try:
+            _atomic_text(path, payload.content)
+        except OSError as exc:
+            raise HTTPException(
+                status_code=503,
+                detail=f"扫键标记文件暂时无法写入，请稍后重试: {exc}",
+            ) from exc
         return {
             "saved": True,
             "markers": _valid_sweep_marker_count(payload.content),

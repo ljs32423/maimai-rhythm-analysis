@@ -8,6 +8,7 @@ from mra.simai_parser import (
     parse_inote,
     parse_level_text,
     parse_maidata,
+    parse_maidata_content,
     parse_slide_duration,
     time_to_beat,
 )
@@ -130,6 +131,18 @@ class ParserTests(unittest.TestCase):
             song = parse_maidata(str(path))
         self.assertEqual(song.title, "Test Song")
         self.assertEqual(song.charts[5].designer, "Chart Author")
+        self.assertEqual(len(song.charts[5].notes), 2)
+
+    def test_parse_maidata_content_without_temporary_file(self):
+        content = """&title=In Memory
+&artist=Tester
+&wholebpm=120
+&lv_5=12
+&inote_5=(120){4}1,2,E
+"""
+        song = parse_maidata_content(content)
+
+        self.assertEqual(song.title, "In Memory")
         self.assertEqual(len(song.charts[5].notes), 2)
 
     def test_parse_level_text_keeps_plus_levels(self):
