@@ -5,11 +5,56 @@ const state = {
   jobId: null,
   jobTimer: null,
   jobStream: null,
+  jobRunning: false,
   settings: null,
   visibleSongs: 120,
+  // 编辑器未保存修改跟踪：saved 记录上次加载/保存的内容
+  saved: {meter: "", sweep: ""},
+  dirty: {meter: false, sweep: false},
 };
 
 const $ = id => document.getElementById(id);
+
+// 统一错误兜底：任何异步操作失败都给出 toast，而不是静默的 unhandled rejection
+function guard(fn) {
+  return async (...args) => {
+    try {
+      await fn(...args);
+    } catch (error) {
+      toast(error.message || String(error), "error");
+    }
+  };
+}
+
+// 操作期间禁用按钮，防止重复点击/重复提交
+async function withBusy(button, fn) {
+  if (button.disabled) return;
+  button.disabled = true;
+  try {
+    await fn();
+  } finally {
+    button.disabled = false;
+  }
+}
+
+function updateDirty(key) {
+  const editor = key === "meter" ? $("meterEditor") : $("sweepEditor");
+  state.dirty[key] = editor.value !== state.saved[key];
+}
+
+function markSaved(key, content) {
+  state.saved[key] = content;
+  state.dirty[key] = false;
+}
+
+function confirmDiscardChanges() {
+  const names = [
+    state.dirty.meter && "拍号文件",
+    state.dirty.sweep && "扫键标记",
+  ].filter(Boolean);
+  if (!names.length) return true;
+  return window.confirm(`${names.join("、")}有未保存的修改，确定要放弃吗？`);
+}
 
 async function api(path, options = {}) {
   const response = await fetch(path, {
@@ -21,11 +66,13 @@ async function api(path, options = {}) {
   return data;
 }
 
-function toast(message) {
-  $("toast").textContent = message;
-  $("toast").classList.remove("hidden");
+function toast(message, type = "info") {
+  const el = $("toast");
+  el.textContent = message;
+  el.dataset.type = type;
+  el.classList.remove("hidden");
   clearTimeout(toast.timer);
-  toast.timer = setTimeout(() => $("toast").classList.add("hidden"), 3500);
+  toast.timer = setTimeout(() => el.classList.add("hidden"), type === "error" ? 6000 : 3500);
 }
 
 function renderSongs() {
@@ -54,7 +101,12 @@ function renderSongs() {
     </article>
   `).join("");
   document.querySelectorAll(".song-card").forEach(card => {
-    card.addEventListener("click", () => openSong(decodeURIComponent(card.dataset.song)));
+    card.addEventListener("click", () => {
+      const id = decodeURIComponent(card.dataset.song);
+      // 再次点击当前打开的歌曲时保持已选难度
+      const keep = state.activeSong && state.activeSong.id === id ? state.difficulty : null;
+      guard(openSong)(id, keep);
+    });
   });
 }
 
@@ -70,7 +122,17 @@ async function loadSongs() {
   renderSongs();
 }
 
-async function openSong(songId) {
+function highlightTab(difficulty) {
+  document.querySelectorAll("#difficultyTabs button").forEach(button => {
+    button.classList.toggle("active", Number(button.dataset.difficulty) === difficulty);
+  });
+}
+
+async function openSong(songId, preferredDifficulty = null) {
+  if (state.activeSong && state.activeSong.id !== songId) {
+    if (!confirmDiscardChanges()) return;
+    state.dirty.meter = state.dirty.sweep = false;
+  }
   state.activeSong = await api(`/api/songs/${encodeURIComponent(songId)}`);
   $("workspaceTitle").textContent = `${state.activeSong.title} · ${state.activeSong.artist || ""}`;
   $("workspace").classList.remove("hidden");
@@ -80,61 +142,97 @@ async function openSong(songId) {
   document.querySelectorAll("#difficultyTabs button").forEach(button => {
     button.addEventListener("click", () => selectDifficulty(Number(button.dataset.difficulty)));
   });
-  const preferred = state.activeSong.difficulties.find(d => d.id === 5) || state.activeSong.difficulties[0];
+  // 优先保持用户当前选中的难度，其次 MASTER，最后第一个可用难度
+  const preferred =
+    state.activeSong.difficulties.find(d => d.id === preferredDifficulty) ||
+    state.activeSong.difficulties.find(d => d.id === 5) ||
+    state.activeSong.difficulties[0];
   if (preferred) await selectDifficulty(preferred.id);
   $("workspace").scrollIntoView({behavior: "smooth", block: "start"});
 }
 
 async function selectDifficulty(difficulty) {
-  state.difficulty = difficulty;
-  document.querySelectorAll("#difficultyTabs button").forEach(button => {
-    button.classList.toggle("active", Number(button.dataset.difficulty) === difficulty);
-  });
+  if (!state.activeSong) return;
+  if (state.difficulty === difficulty) {
+    // openSong 重建 Tab 后会走到这里，只需恢复高亮
+    highlightTab(difficulty);
+    return;
+  }
+  if (!confirmDiscardChanges()) return;
   const songId = encodeURIComponent(state.activeSong.id);
-  const [meter, sweep] = await Promise.all([
-    api(`/api/songs/${songId}/meter/${difficulty}`),
-    api(`/api/songs/${songId}/sweep`),
-  ]);
-  $("meterEditor").value = JSON.stringify(meter.data, null, 2);
-  $("sweepEditor").value = sweep.content;
-  const diff = state.activeSong.difficulties.find(item => item.id === difficulty);
-  const path = `/library/${songId}/outputs/${difficulty === 6 ? "ReMASTER" :
-    diff.name}/html/analysis.html`;
-  $("analysisLink").href = path;
-  $("analysisLink").classList.toggle("disabled", !diff.outputs.analysis);
+  try {
+    const [meter, sweep] = await Promise.all([
+      api(`/api/songs/${songId}/meter/${difficulty}`),
+      api(`/api/songs/${songId}/sweep`),
+    ]);
+    state.difficulty = difficulty;
+    const meterText = JSON.stringify(meter.data, null, 2);
+    $("meterEditor").value = meterText;
+    $("sweepEditor").value = sweep.content;
+    markSaved("meter", meterText);
+    markSaved("sweep", sweep.content);
+    highlightTab(difficulty);
+    const diff = state.activeSong.difficulties.find(item => item.id === difficulty);
+    if (diff.outputs.analysis) {
+      $("analysisLink").href = `/library/${songId}/outputs/${difficulty === 6 ? "ReMASTER" :
+        diff.name}/html/analysis.html`;
+    } else {
+      $("analysisLink").removeAttribute("href");
+    }
+    $("analysisLink").classList.toggle("disabled", !diff.outputs.analysis);
+  } catch (error) {
+    // 失败时回退 Tab 高亮，保持界面与编辑器内容一致
+    highlightTab(state.difficulty);
+    toast(error.message, "error");
+  }
 }
 
 async function saveMeter() {
+  if (!state.activeSong || !state.difficulty) return;
   let data;
   try { data = JSON.parse($("meterEditor").value); }
-  catch (error) { toast(`JSON 格式错误：${error.message}`); return; }
-  await api(`/api/songs/${encodeURIComponent(state.activeSong.id)}/meter/${state.difficulty}`, {
-    method: "PUT", body: JSON.stringify({data}),
+  catch (error) { toast(`JSON 格式错误：${error.message}`, "error"); return; }
+  await withBusy($("saveMeterButton"), async () => {
+    await api(`/api/songs/${encodeURIComponent(state.activeSong.id)}/meter/${state.difficulty}`, {
+      method: "PUT", body: JSON.stringify({data}),
+    });
+    markSaved("meter", $("meterEditor").value);
+    toast("拍号文件已保存，重新生成后生效", "success");
   });
-  toast("拍号文件已保存，重新生成后生效");
 }
 
 async function saveSweep() {
+  if (!state.activeSong) return;
   const content = $("sweepEditor").value;
-  const result = await api(`/api/songs/${encodeURIComponent(state.activeSong.id)}/sweep`, {
-    method: "PUT", body: JSON.stringify({content}),
+  await withBusy($("saveSweepButton"), async () => {
+    const result = await api(`/api/songs/${encodeURIComponent(state.activeSong.id)}/sweep`, {
+      method: "PUT", body: JSON.stringify({content}),
+    });
+    markSaved("sweep", content);
+    toast(`扫键标记文件已保存，共 ${result.markers} 个 /S`, "success");
   });
-  toast(`扫键标记文件已保存，共 ${result.markers} 个 /S`);
 }
 
 async function startJob() {
   if (!state.activeSong || !state.difficulty) return;
-  const job = await api("/api/jobs", {
-    method: "POST",
-    body: JSON.stringify({
-      song_id: state.activeSong.id,
-      difficulty: state.difficulty,
-      force: $("forceInput").checked,
-    }),
+  if (state.jobRunning) {
+    toast("已有任务在运行，请先等待完成或停止当前任务", "error");
+    return;
+  }
+  await withBusy($("runButton"), async () => {
+    const job = await api("/api/jobs", {
+      method: "POST",
+      body: JSON.stringify({
+        song_id: state.activeSong.id,
+        difficulty: state.difficulty,
+        force: $("forceInput").checked,
+      }),
+    });
+    state.jobId = job.id;
+    state.jobRunning = true;
+    $("cancelButton").classList.remove("hidden");
+    watchJob();
   });
-  state.jobId = job.id;
-  $("cancelButton").classList.remove("hidden");
-  watchJob();
 }
 
 function renderJob(job) {
@@ -155,11 +253,13 @@ function watchJob() {
     if (["completed", "failed", "cancelled"].includes(job.status)) {
       source.close();
       state.jobStream = null;
+      state.jobRunning = false;
       $("cancelButton").classList.add("hidden");
       if (job.status === "completed") {
-        toast("处理完成");
-        await openSong(state.activeSong.id);
-      } else if (job.error) toast(job.error);
+        toast("处理完成", "success");
+        // 重新加载歌曲信息（刷新产物状态），保持当前难度不变
+        await guard(openSong)(state.activeSong.id, state.difficulty);
+      } else if (job.error) toast(job.error, "error");
     }
   };
   source.onerror = async () => {
@@ -168,11 +268,15 @@ function watchJob() {
     try {
       const job = await api(`/api/jobs/${state.jobId}`);
       renderJob(job);
-      if (!["completed", "failed", "cancelled"].includes(job.status)) {
+      if (["completed", "failed", "cancelled"].includes(job.status)) {
+        state.jobRunning = false;
+        $("cancelButton").classList.add("hidden");
+      } else {
         state.jobTimer = setTimeout(watchJob, 1000);
       }
     } catch (error) {
-      toast(error.message);
+      state.jobRunning = false;
+      toast(error.message, "error");
     }
   };
 }
@@ -193,17 +297,20 @@ async function loadSettings() {
 }
 
 async function saveSettings() {
+  if (!state.settings) return;
   const data = structuredClone(state.settings);
   data.encoder = $("encoderInput").value;
   data.recording.width = Number($("widthInput").value);
   data.recording.height = Number($("heightInput").value);
   data.recording.fps = Number($("fpsInput").value);
   data.recording.quality = $("qualityInput").value;
-  const result = await api("/api/settings", {
-    method: "PUT", body: JSON.stringify({data}),
+  await withBusy($("saveSettingsButton"), async () => {
+    const result = await api("/api/settings", {
+      method: "PUT", body: JSON.stringify({data}),
+    });
+    state.settings = result.data;
+    toast("设置已保存；录制参数将在重启后生效", "success");
   });
-  state.settings = result.data;
-  toast("设置已保存；录制参数将在重启后生效");
 }
 
 async function loadSystem(refresh = false) {
@@ -226,15 +333,25 @@ function bind() {
     state.visibleSongs += 120;
     renderSongs();
   });
-  $("refreshButton").addEventListener("click", loadSongs);
+  $("refreshButton").addEventListener("click", guard(loadSongs));
   $("settingsButton").addEventListener("click", () => $("settingsPanel").classList.toggle("hidden"));
-  $("probeButton").addEventListener("click", () => loadSystem(true));
-  $("saveSettingsButton").addEventListener("click", saveSettings);
-  $("closeWorkspace").addEventListener("click", () => $("workspace").classList.add("hidden"));
-  $("saveMeterButton").addEventListener("click", saveMeter);
-  $("saveSweepButton").addEventListener("click", saveSweep);
-  $("runButton").addEventListener("click", startJob);
-  $("cancelButton").addEventListener("click", cancelJob);
+  $("probeButton").addEventListener("click", () => guard(loadSystem)(true));
+  $("saveSettingsButton").addEventListener("click", guard(saveSettings));
+  $("closeWorkspace").addEventListener("click", () => {
+    if (confirmDiscardChanges()) $("workspace").classList.add("hidden");
+  });
+  $("saveMeterButton").addEventListener("click", guard(saveMeter));
+  $("saveSweepButton").addEventListener("click", guard(saveSweep));
+  $("runButton").addEventListener("click", guard(startJob));
+  $("cancelButton").addEventListener("click", guard(cancelJob));
+  $("meterEditor").addEventListener("input", () => updateDirty("meter"));
+  $("sweepEditor").addEventListener("input", () => updateDirty("sweep"));
+  window.addEventListener("beforeunload", event => {
+    if (state.dirty.meter || state.dirty.sweep) {
+      event.preventDefault();
+      event.returnValue = "";
+    }
+  });
 }
 
 async function boot() {
