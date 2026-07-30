@@ -1,4 +1,5 @@
 import json
+import os
 import tempfile
 import unittest
 from pathlib import Path
@@ -7,7 +8,7 @@ from unittest import mock
 from fastapi import HTTPException
 from fastapi.testclient import TestClient
 
-from mra.web_app import _safe_song, create_app
+from mra.web_app import _atomic_text, _safe_song, create_app
 
 
 MAIDATA = """&title=Web Test
@@ -77,6 +78,41 @@ class WebAppTests(unittest.TestCase):
         )
         self.assertEqual(response.status_code, 422)
         self.assertFalse((self.song / "maidata_sweep.txt").exists())
+
+    def test_sweep_save_tolerates_temp_cleanup_failure(self):
+        # 杀毒软件锁定或沙箱拦截删除时，清理临时文件失败不应使保存失败
+        marked = MAIDATA.replace("1,2,3,E", "1/S,2,3,E")
+        real_unlink = Path.unlink
+
+        def flaky_unlink(self, *args, **kwargs):
+            if self.name.startswith(".maidata_sweep."):
+                raise OSError("simulated temp-file lock")
+            return real_unlink(self, *args, **kwargs)
+
+        with mock.patch.object(Path, "unlink", flaky_unlink):
+            response = self.client.put(
+                "/api/songs/Web%20Test/sweep", json={"content": marked},
+            )
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["markers"], 1)
+        self.assertEqual(
+            self.client.get("/api/songs/Web%20Test/sweep").json()["content"],
+            marked,
+        )
+
+    def test_atomic_text_reports_real_error_when_cleanup_fails(self):
+        # 写入失败时，临时文件清理失败不能掩盖真正的错误
+        def bad_replace(*args, **kwargs):
+            raise OSError("simulated replace failure")
+
+        def bad_unlink(self, *args, **kwargs):
+            raise OSError("simulated cleanup failure")
+
+        with mock.patch("mra.web_app.os.replace", bad_replace), \
+             mock.patch.object(Path, "unlink", bad_unlink):
+            with self.assertRaises(OSError) as context:
+                _atomic_text(self.root / "dummy.txt", "x")
+        self.assertIn("replace failure", str(context.exception))
 
     def test_invalid_meter_is_rejected_without_overwriting(self):
         response = self.client.put(

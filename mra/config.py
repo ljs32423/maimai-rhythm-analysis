@@ -127,8 +127,12 @@ def save_config(data: dict[str, Any], path: str | Path | None = None) -> dict[st
         )
         os.replace(temporary, target)
     finally:
-        if temporary.exists():
-            temporary.unlink()
+        # 清理失败（杀毒软件锁定、沙箱拦截删除等）不影响保存结果
+        try:
+            if temporary.exists():
+                temporary.unlink()
+        except OSError:
+            pass
     return validated
 
 

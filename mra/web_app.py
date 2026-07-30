@@ -55,6 +55,21 @@ class JsonPayload(BaseModel):
     data: dict[str, Any]
 
 
+def _cleanup_temp_file(path: Path | None) -> None:
+    """尽力清理临时文件；清理失败绝不能掩盖操作的真正结果。
+
+    Windows 上杀毒软件可能短暂锁定刚写入的临时文件，某些沙箱环境会拦截
+    删除操作。此时请求本身已经成功，不应因为删除失败而返回错误。
+    """
+    if path is None:
+        return
+    try:
+        if path.exists():
+            path.unlink()
+    except OSError:
+        pass
+
+
 def _atomic_text(path: Path, content: str, *, backup: bool = True) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     if backup and path.is_file():
@@ -64,8 +79,7 @@ def _atomic_text(path: Path, content: str, *, backup: bool = True) -> None:
         temporary.write_text(content, encoding="utf-8")
         os.replace(temporary, path)
     finally:
-        if temporary.exists():
-            temporary.unlink()
+        _cleanup_temp_file(temporary)
 
 
 def _sha256_text(content: str) -> str:
@@ -369,8 +383,7 @@ def create_app(
         except Exception as exc:
             raise HTTPException(status_code=422, detail=f"扫键标记文件无效: {exc}") from exc
         finally:
-            if temporary and temporary.exists():
-                temporary.unlink()
+            _cleanup_temp_file(temporary)
         _atomic_text(path, payload.content)
         return {
             "saved": True,
