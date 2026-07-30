@@ -92,7 +92,7 @@ function renderSongs() {
     return;
   }
   $("songGrid").innerHTML = visible.map(song => `
-    <article class="song-card panel" data-song="${encodeURIComponent(song.id)}">
+    <article class="song-card panel" data-song="${encodeURIComponent(song.id)}" tabindex="0" role="button">
       ${song.cover_url ? `<img class="song-cover" src="${song.cover_url}" loading="lazy" decoding="async" alt="">` : ""}
       <div class="song-content">
         <h3 class="song-title">${escapeHtml(song.title)}</h3>
@@ -100,7 +100,7 @@ function renderSongs() {
         <p class="song-meta">BPM ${escapeHtml(String(song.bpm || "—"))}</p>
         <div class="badges">
           ${(song.difficulties || []).map(diff =>
-            `<span class="badge">${escapeHtml(diff.name)} · ${escapeHtml(String(diff.level))}</span>`
+            `<span class="badge badge-d${diff.id}">${escapeHtml(diff.name)} · ${escapeHtml(String(diff.level))}</span>`
           ).join("")}
         </div>
       </div>
@@ -189,7 +189,8 @@ async function openSong(songId, preferredDifficulty = null) {
     state.activeSong.difficulties.find(d => d.id === 5) ||
     state.activeSong.difficulties[0];
   if (preferred) await selectDifficulty(preferred.id);
-  $("workspace").scrollIntoView({behavior: "smooth", block: "start"});
+  const reduceMotion = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+  $("workspace").scrollIntoView({behavior: reduceMotion ? "auto" : "smooth", block: "start"});
 }
 
 async function selectDifficulty(difficulty) {
@@ -380,6 +381,14 @@ function bind() {
     // 再次点击当前打开的歌曲时保持已选难度
     const keep = state.activeSong && state.activeSong.id === id ? state.difficulty : null;
     guard(openSong)(id, keep);
+  });
+  // 键盘可达：Enter/空格 激活聚焦的卡片
+  $("songGrid").addEventListener("keydown", event => {
+    if (event.key !== "Enter" && event.key !== " ") return;
+    const card = event.target.closest(".song-card");
+    if (!card || card.classList.contains("skeleton")) return;
+    event.preventDefault();
+    card.click();
   });
   $("refreshButton").addEventListener("click", guard(loadSongs));
   $("settingsButton").addEventListener("click", () => $("settingsPanel").classList.toggle("hidden"));
