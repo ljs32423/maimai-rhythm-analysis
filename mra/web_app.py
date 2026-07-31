@@ -510,7 +510,7 @@ def _running_instance_url() -> str | None:
     return None
 
 
-def _cleanup_stale_videos(songs_root: Path, max_age_days: int = 1, dry_run: bool = False):
+def _cleanup_stale_videos(songs_root: Path, max_age_days: int = 5, dry_run: bool = False):
     """Delete preview and strip videos older than *max_age_days*.
 
     扫描所有歌曲目录中的 preview.mp4 和 strip_video.mp4，
@@ -573,7 +573,7 @@ def main(argv: list[str] | None = None) -> int:
     for warning in warnings:
         print(f"警告: {warning}")
 
-    # 启动时清理超过 1 天的视频文件
+    # 启动时清理超过 5 天的视频文件
     songs_root = resolve_songs_root(config)
     _cleanup_stale_videos(songs_root)
 
