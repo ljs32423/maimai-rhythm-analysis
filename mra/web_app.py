@@ -28,13 +28,16 @@ from .config import (ConfigError, load_config, resolve_songs_root, save_config,
                      validate_config)
 from .difficulty import (DIFFICULTY_NAMES, analysis_html_path,
                          difficulty_output_dir, meter_file_path,
+                         legacy_sweep_maidata_path,
                          preview_video_path, rhythm_svg_path,
                          sweep_maidata_path)
 from .ffmpeg_capabilities import detect_capabilities, find_binary
-from .meter import MeterMap
+from .meter import MeterMap, load_meter_map
 from .simai_parser import parse_maidata, parse_maidata_content
 from .song_library import PROJECT_ROOT
-from .sweep_marks import strip_sweep_markers
+from .sweep_marks import (SweepDifficultyMissingError,
+                          extract_sweep_difficulty, reflow_sweep_maidata,
+                          sweep_maidata_semantically_equal)
 from .web_jobs import JobManager
 
 
@@ -116,6 +119,57 @@ def _valid_sweep_marker_count(content: str) -> int:
     return len(re.findall(r"/S(?=[,/\s]|$)", content))
 
 
+def _validate_sweep_difficulty(content: str, difficulty: int) -> None:
+    """Require one self-contained sweep chart for the requested difficulty."""
+    parsed = parse_maidata_content(content)
+    if set(parsed.charts) != {difficulty}:
+        found = "、".join(str(value) for value in sorted(parsed.charts)) or "无"
+        raise ValueError(
+            f"文件必须只包含难度 {difficulty} 的谱面，当前包含：{found}",
+        )
+    if extract_sweep_difficulty(content, difficulty) != content:
+        raise ValueError("文件中包含其他难度的等级、谱师或谱面字段")
+
+
+def _reflow_sweep_for_difficulty(
+    song_dir: Path,
+    content: str,
+    difficulty: int,
+) -> str:
+    """Apply one difficulty's meter map without writing any files."""
+    _validate_sweep_difficulty(content, difficulty)
+    parsed = parse_maidata_content(content)
+    return reflow_sweep_maidata(
+        content,
+        parsed.bpm,
+        {difficulty: load_meter_map(song_dir, difficulty)},
+    )
+
+
+def _sweep_baseline(song_dir: Path, difficulty: int) -> tuple[str, str, bool]:
+    """Load a per-difficulty file or project a read-only legacy/source file."""
+    path = sweep_maidata_path(song_dir, difficulty)
+    if path.is_file():
+        return path.read_text(encoding="utf-8"), "difficulty", True
+
+    legacy = legacy_sweep_maidata_path(song_dir)
+    if legacy.is_file():
+        try:
+            return (
+                extract_sweep_difficulty(
+                    legacy.read_text(encoding="utf-8"), difficulty,
+                ),
+                "legacy",
+                False,
+            )
+        except SweepDifficultyMissingError:
+            # Some old aggregate files may not contain every source difficulty.
+            pass
+
+    source = (song_dir / "maidata.txt").read_text(encoding="utf-8")
+    return extract_sweep_difficulty(source, difficulty), "maidata", False
+
+
 def _cover_path(song_dir: Path) -> Path | None:
     preferred = ("bg.png", "bg.jpg", "bg.jpeg", "cover.png", "cover.jpg", "jacket.png")
     files = {path.name.casefold(): path for path in song_dir.iterdir() if path.is_file()}
@@ -154,8 +208,11 @@ def _song_info(song_dir: Path) -> dict[str, Any]:
     song = parse_maidata(str(song_dir / "maidata.txt"))
     cover = _cover_path(song_dir)
     difficulties = []
+    any_difficulty_sweep = False
     for difficulty, chart in sorted(song.charts.items()):
         output = difficulty_output_dir(song_dir, difficulty)
+        difficulty_sweep = sweep_maidata_path(song_dir, difficulty).is_file()
+        any_difficulty_sweep = any_difficulty_sweep or difficulty_sweep
         difficulties.append({
             "id": difficulty,
             "name": DIFFICULTY_NAMES.get(difficulty, str(difficulty)),
@@ -166,6 +223,7 @@ def _song_info(song_dir: Path) -> dict[str, Any]:
                 "preview": preview_video_path(song_dir, difficulty).is_file(),
                 "rhythm": rhythm_svg_path(song_dir, difficulty).is_file(),
                 "analysis": analysis_html_path(song_dir, difficulty).is_file(),
+                "sweep": difficulty_sweep,
                 "directory": output.is_dir(),
             },
         })
@@ -180,7 +238,10 @@ def _song_info(song_dir: Path) -> dict[str, Any]:
             f"/library/{urllib.parse.quote(song_dir.name)}/{urllib.parse.quote(cover.name)}"
             if cover else None
         ),
-        "sweep_exists": sweep_maidata_path(song_dir).is_file(),
+        "sweep_exists": (
+            any_difficulty_sweep
+            or legacy_sweep_maidata_path(song_dir).is_file()
+        ),
         "difficulties": difficulties,
     }
 
@@ -211,7 +272,10 @@ def _song_summary(song_dir: Path) -> dict[str, Any]:
         for match in re.finditer(r"^&inote_([1-7])=", content, re.MULTILINE)
     }
     difficulties = []
+    any_difficulty_sweep = False
     for difficulty in sorted(charts):
+        difficulty_sweep = sweep_maidata_path(song_dir, difficulty).is_file()
+        any_difficulty_sweep = any_difficulty_sweep or difficulty_sweep
         difficulties.append({
             "id": difficulty,
             "name": DIFFICULTY_NAMES.get(difficulty, str(difficulty)),
@@ -222,6 +286,7 @@ def _song_summary(song_dir: Path) -> dict[str, Any]:
                 "preview": preview_video_path(song_dir, difficulty).is_file(),
                 "rhythm": rhythm_svg_path(song_dir, difficulty).is_file(),
                 "analysis": analysis_html_path(song_dir, difficulty).is_file(),
+                "sweep": difficulty_sweep,
                 "directory": difficulty_output_dir(song_dir, difficulty).is_dir(),
             },
         })
@@ -241,7 +306,10 @@ def _song_summary(song_dir: Path) -> dict[str, Any]:
             f"/library/{urllib.parse.quote(song_dir.name)}/{urllib.parse.quote(cover.name)}"
             if cover else None
         ),
-        "sweep_exists": sweep_maidata_path(song_dir).is_file(),
+        "sweep_exists": (
+            any_difficulty_sweep
+            or legacy_sweep_maidata_path(song_dir).is_file()
+        ),
         "difficulties": difficulties,
     }
 
@@ -371,38 +439,62 @@ def create_app(
         _atomic_text(path, json.dumps(data, ensure_ascii=False, indent=2) + "\n")
         return {"saved": True, "data": data}
 
-    @app.get("/api/songs/{song_id}/sweep")
-    def get_sweep(song_id: str):
+    @app.get("/api/songs/{song_id}/sweep/{difficulty}")
+    def get_sweep(song_id: str, difficulty: int):
         song_dir = _safe_song(root, song_id)
-        path = sweep_maidata_path(song_dir)
-        source = path if path.is_file() else song_dir / "maidata.txt"
-        content = source.read_text(encoding="utf-8")
+        song = parse_maidata(str(song_dir / "maidata.txt"))
+        if difficulty not in song.charts:
+            raise HTTPException(status_code=404, detail="歌曲没有这个难度")
+        try:
+            raw_content, source, exists = _sweep_baseline(song_dir, difficulty)
+            content = _reflow_sweep_for_difficulty(
+                song_dir, raw_content, difficulty,
+            )
+        except Exception as exc:
+            raise HTTPException(
+                status_code=422,
+                detail=f"扫键谱面无法按拍号分行: {exc}",
+            ) from exc
         return {
-            "exists": path.is_file(),
+            "exists": exists,
+            "difficulty": difficulty,
+            "source": source,
             "content": content,
             "markers": _valid_sweep_marker_count(content),
             "sha256": _sha256_text(content),
         }
 
-    @app.put("/api/songs/{song_id}/sweep")
-    def put_sweep(song_id: str, payload: TextPayload):
+    @app.put("/api/songs/{song_id}/sweep/{difficulty}")
+    def put_sweep(song_id: str, difficulty: int, payload: TextPayload):
         song_dir = _safe_song(root, song_id)
-        path = sweep_maidata_path(song_dir)
-        baseline_path = path if path.is_file() else song_dir / "maidata.txt"
-        baseline = baseline_path.read_text(encoding="utf-8")
-        if strip_sweep_markers(payload.content) != strip_sweep_markers(baseline):
+        song = parse_maidata(str(song_dir / "maidata.txt"))
+        if difficulty not in song.charts:
+            raise HTTPException(status_code=404, detail="歌曲没有这个难度")
+        path = sweep_maidata_path(song_dir, difficulty)
+        try:
+            baseline, _, _ = _sweep_baseline(song_dir, difficulty)
+            _validate_sweep_difficulty(payload.content, difficulty)
+        except Exception as exc:
             raise HTTPException(
                 status_code=422,
-                detail="只能增删 /S 标记，不能在此处修改谱面时间结构",
+                detail=f"扫键标记文件无效: {exc}",
+            ) from exc
+        if not sweep_maidata_semantically_equal(payload.content, baseline):
+            raise HTTPException(
+                status_code=422,
+                detail="只能增删 /S 标记，不能在此处修改音符、时间或歌曲信息",
             )
         try:
-            parsed = parse_maidata_content(payload.content)
-            if not parsed.charts:
-                raise ValueError("文件中没有可用谱面")
+            content = _reflow_sweep_for_difficulty(
+                song_dir, payload.content, difficulty,
+            )
         except Exception as exc:
-            raise HTTPException(status_code=422, detail=f"扫键标记文件无效: {exc}") from exc
+            raise HTTPException(
+                status_code=422,
+                detail=f"扫键谱面无法按拍号分行: {exc}",
+            ) from exc
         try:
-            _atomic_text(path, payload.content)
+            _atomic_text(path, content)
         except OSError as exc:
             raise HTTPException(
                 status_code=503,
@@ -410,9 +502,18 @@ def create_app(
             ) from exc
         return {
             "saved": True,
-            "markers": _valid_sweep_marker_count(payload.content),
-            "sha256": _sha256_text(payload.content),
+            "difficulty": difficulty,
+            "source": "difficulty",
+            "content": content,
+            "markers": _valid_sweep_marker_count(content),
+            "sha256": _sha256_text(content),
         }
+
+    @app.get("/api/songs/{song_id}/sweep")
+    @app.put("/api/songs/{song_id}/sweep")
+    def sweep_requires_difficulty(song_id: str):
+        _safe_song(root, song_id)
+        raise HTTPException(status_code=400, detail="请在扫键文件接口中指定难度")
 
     @app.get("/api/settings")
     def get_settings():

@@ -8,6 +8,9 @@ const state = {
   jobRunning: false,
   settings: null,
   visibleSongs: 120,
+  songRequest: 0,
+  editorEpoch: 0,
+  editorRevision: 0,
   // 编辑器未保存修改跟踪：saved 记录上次加载/保存的内容
   saved: {meter: "", sweep: ""},
   dirty: {meter: false, sweep: false},
@@ -45,6 +48,118 @@ function updateDirty(key) {
 function markSaved(key, content) {
   state.saved[key] = content;
   state.dirty[key] = false;
+}
+
+function ownsEditor(songId, difficulty, epoch) {
+  return (
+    state.editorEpoch === epoch
+    && state.activeSong?.id === songId
+    && state.difficulty === difficulty
+  );
+}
+
+function scanSweepLine(line) {
+  let hasPlayable = false;
+  let hasTerminalE = false;
+  let hasCommaBeforeTerminal = false;
+  const closing = {"(": ")", "{": "}", "[": "]"};
+  for (let index = 0; index < line.length;) {
+    const token = line[index];
+    if (token === ",") {
+      hasCommaBeforeTerminal = true;
+      index += 1;
+      continue;
+    }
+    if (/\s/.test(token) || token === "/" || token === "`") {
+      index += 1;
+      continue;
+    }
+    if (closing[token]) {
+      const end = line.indexOf(closing[token], index + 1);
+      index = end < 0 ? line.length : end + 1;
+      continue;
+    }
+    if (/[0-9]/.test(token)) {
+      let end = index + 1;
+      while (/[0-9]/.test(line[end] || "")) end += 1;
+      const button = Number(line.slice(index, end));
+      if (button >= 1 && button <= 8) hasPlayable = true;
+      index = end;
+      continue;
+    }
+    if (/[ABCD]/.test(token)) {
+      hasPlayable = true;
+      index += 1;
+      continue;
+    }
+    if (token === "E") {
+      if (/[0-9hf]/.test(line[index + 1] || "")) {
+        hasPlayable = true;
+        index += 1;
+        continue;
+      }
+      hasTerminalE = true;
+      break;
+    }
+    index += 1;
+  }
+  return {hasPlayable, hasTerminalE, hasCommaBeforeTerminal};
+}
+
+function sweepMeasureNumbers(content) {
+  let inote = false;
+  let numberingStarted = false;
+  let measure = 0;
+  return content.split("\n").map(line => {
+    const field = line.match(/^\s*&inote_[1-7]=(.*)$/);
+    const body = field ? field[1] : line;
+    const scanned = scanSweepLine(body);
+    if (field) {
+      inote = true;
+      numberingStarted = false;
+      measure = 0;
+      if (!body.trim()) return "";
+    } else if (/^\s*&/.test(line)) {
+      inote = false;
+      return "";
+    }
+
+    if (!inote || !line.trim()) return "";
+    const pureEnd = (
+      scanned.hasTerminalE
+      && !scanned.hasPlayable
+      && !scanned.hasCommaBeforeTerminal
+    );
+    if (pureEnd) {
+      inote = false;
+      return "";
+    }
+    if (!numberingStarted) {
+      if (!scanned.hasPlayable) {
+        if (scanned.hasTerminalE) inote = false;
+        return "";
+      }
+      numberingStarted = true;
+    }
+    measure += 1;
+    if (scanned.hasTerminalE) inote = false;
+    return String(measure);
+  }).join("\n");
+}
+
+function syncSweepMeasureGutter() {
+  const editor = $("sweepEditor");
+  $("sweepMeasureNumbers").style.transform = `translateY(${-editor.scrollTop}px)`;
+}
+
+function updateSweepMeasureGutter() {
+  $("sweepMeasureNumbers").textContent = sweepMeasureNumbers($("sweepEditor").value);
+  syncSweepMeasureGutter();
+}
+
+function setSweepEditorContent(content) {
+  $("sweepEditor").value = content;
+  updateSweepMeasureGutter();
 }
 
 function confirmDiscardChanges() {
@@ -164,12 +279,38 @@ function updateAnalysisLink() {
   }
 }
 
-async function openSong(songId, preferredDifficulty = null) {
-  if (state.activeSong && state.activeSong.id !== songId) {
+async function openSong(songId, preferredDifficulty = null, forceReload = false) {
+  const previousSongId = state.activeSong?.id || null;
+  const songChanged = previousSongId !== songId;
+  const reloadEditors = songChanged || forceReload;
+  if (state.activeSong && reloadEditors) {
     if (!confirmDiscardChanges()) return;
-    state.dirty.meter = state.dirty.sweep = false;
   }
-  state.activeSong = await api(`/api/songs/${encodeURIComponent(songId)}`);
+  const request = ++state.songRequest;
+  const editorEpoch = state.editorEpoch;
+  const editorRevision = state.editorRevision;
+  let song;
+  try {
+    song = await api(`/api/songs/${encodeURIComponent(songId)}`);
+  } catch (error) {
+    if (request === state.songRequest) throw error;
+    return;
+  }
+  if (request !== state.songRequest) return;
+  // 任何会重载编辑器的迟到响应，都不能盖掉随后发起的难度切换。
+  if (reloadEditors && state.editorEpoch !== editorEpoch) return;
+  if (reloadEditors && state.editorRevision !== editorRevision
+      && !confirmDiscardChanges()) return;
+  if (reloadEditors) {
+    // 新歌曲或任务完成后，即使难度编号相同也必须重新加载两个编辑器。
+    state.editorEpoch += 1;
+    state.difficulty = null;
+    $("meterEditor").value = "";
+    setSweepEditorContent("");
+    markSaved("meter", "");
+    markSaved("sweep", "");
+  }
+  state.activeSong = song;
   $("workspaceTitle").textContent = `${state.activeSong.title} · ${state.activeSong.artist || ""}`;
   $("workspace").classList.remove("hidden");
   $("difficultyTabs").innerHTML = state.activeSong.difficulties.map(diff => {
@@ -202,21 +343,30 @@ async function selectDifficulty(difficulty) {
     return;
   }
   if (!confirmDiscardChanges()) return;
-  const songId = encodeURIComponent(state.activeSong.id);
+  const activeSongId = state.activeSong.id;
+  const songId = encodeURIComponent(activeSongId);
+  const request = ++state.editorEpoch;
+  const editorRevision = state.editorRevision;
   try {
     const [meter, sweep] = await Promise.all([
       api(`/api/songs/${songId}/meter/${difficulty}`),
-      api(`/api/songs/${songId}/sweep`),
+      api(`/api/songs/${songId}/sweep/${difficulty}`),
     ]);
+    if (request !== state.editorEpoch || state.activeSong?.id !== activeSongId) return;
+    if (state.editorRevision !== editorRevision && !confirmDiscardChanges()) {
+      highlightTab(state.difficulty);
+      return;
+    }
     state.difficulty = difficulty;
     const meterText = JSON.stringify(meter.data, null, 2);
     $("meterEditor").value = meterText;
-    $("sweepEditor").value = sweep.content;
+    setSweepEditorContent(sweep.content);
     markSaved("meter", meterText);
     markSaved("sweep", sweep.content);
     highlightTab(difficulty);
     updateAnalysisLink();
   } catch (error) {
+    if (request !== state.editorEpoch || state.activeSong?.id !== activeSongId) return;
     // 失败时回退 Tab 高亮，保持界面与编辑器内容一致
     highlightTab(state.difficulty);
     toast(error.message, "error");
@@ -225,26 +375,59 @@ async function selectDifficulty(difficulty) {
 
 async function saveMeter() {
   if (!state.activeSong || !state.difficulty) return;
+  const activeSongId = state.activeSong.id;
+  const difficulty = state.difficulty;
+  const epoch = state.editorEpoch;
+  const meterContent = $("meterEditor").value;
   let data;
-  try { data = JSON.parse($("meterEditor").value); }
+  try { data = JSON.parse(meterContent); }
   catch (error) { toast(`JSON 格式错误：${error.message}`, "error"); return; }
   await withBusy($("saveMeterButton"), async () => {
-    await api(`/api/songs/${encodeURIComponent(state.activeSong.id)}/meter/${state.difficulty}`, {
+    const songId = encodeURIComponent(activeSongId);
+    await api(`/api/songs/${songId}/meter/${difficulty}`, {
       method: "PUT", body: JSON.stringify({data}),
     });
-    markSaved("meter", $("meterEditor").value);
-    toast("拍号文件已保存，重新生成后生效", "success");
+    if (!ownsEditor(activeSongId, difficulty, epoch)) return;
+    markSaved("meter", meterContent);
+    updateDirty("meter");
+    if (state.dirty.sweep) {
+      toast("拍号文件已保存；扫键谱面有未保存修改，将在保存时按新拍号分行", "success");
+      return;
+    }
+    const sweep = await api(`/api/songs/${songId}/sweep/${difficulty}`);
+    if (!ownsEditor(activeSongId, difficulty, epoch)) return;
+    if (state.dirty.sweep) {
+      toast("拍号文件已保存；扫键谱面有未保存修改，将在保存时按新拍号分行", "success");
+      return;
+    }
+    setSweepEditorContent(sweep.content);
+    markSaved("sweep", sweep.content);
+    toast("拍号文件已保存，扫键谱面已按新拍号重新分行", "success");
   });
 }
 
 async function saveSweep() {
-  if (!state.activeSong) return;
+  if (!state.activeSong || !state.difficulty) return;
+  const activeSongId = state.activeSong.id;
+  const difficulty = state.difficulty;
+  const epoch = state.editorEpoch;
   const content = $("sweepEditor").value;
   await withBusy($("saveSweepButton"), async () => {
-    const result = await api(`/api/songs/${encodeURIComponent(state.activeSong.id)}/sweep`, {
-      method: "PUT", body: JSON.stringify({content}),
-    });
-    markSaved("sweep", content);
+    const result = await api(
+      `/api/songs/${encodeURIComponent(activeSongId)}/sweep/${difficulty}`,
+      {
+        method: "PUT", body: JSON.stringify({content}),
+      },
+    );
+    if (!ownsEditor(activeSongId, difficulty, epoch)) return;
+    if ($("sweepEditor").value !== content) {
+      state.saved.sweep = result.content;
+      updateDirty("sweep");
+      toast(`扫键标记文件已保存，共 ${result.markers} 个 /S；编辑器中还有新的未保存修改`, "success");
+      return;
+    }
+    setSweepEditorContent(result.content);
+    markSaved("sweep", result.content);
     toast(`扫键标记文件已保存，共 ${result.markers} 个 /S`, "success");
   });
 }
@@ -278,35 +461,53 @@ function renderJob(job) {
   $("jobLog").scrollTop = $("jobLog").scrollHeight;
 }
 
+async function handleTerminalJob(job) {
+  if (job.id !== state.jobId || !state.jobRunning) return;
+  state.jobRunning = false;
+  $("cancelButton").classList.add("hidden");
+  if (state.jobTimer) {
+    clearTimeout(state.jobTimer);
+    state.jobTimer = null;
+  }
+  if (job.status === "completed") {
+    toast("处理完成", "success");
+    await loadSongs();
+    // 用户已切到别的歌曲时，只刷新歌曲列表，不触碰当前编辑器。
+    if (state.activeSong?.id === job.song) {
+      await openSong(job.song, state.difficulty, true);
+    }
+  } else if (job.error) {
+    toast(job.error, "error");
+  }
+}
+
 function watchJob() {
   if (!state.jobId) return;
   if (state.jobStream) state.jobStream.close();
-  const source = new EventSource(`/api/jobs/${state.jobId}/events`);
+  const watchedJobId = state.jobId;
+  state.jobTimer = null;
+  const source = new EventSource(`/api/jobs/${watchedJobId}/events`);
   state.jobStream = source;
   source.onmessage = async event => {
+    if (state.jobId !== watchedJobId) return;
     const job = JSON.parse(event.data);
     renderJob(job);
     if (["completed", "failed", "cancelled"].includes(job.status)) {
       source.close();
-      state.jobStream = null;
-      state.jobRunning = false;
-      $("cancelButton").classList.add("hidden");
-      if (job.status === "completed") {
-        toast("处理完成", "success");
-        // 重新加载歌曲信息（刷新产物状态），保持当前难度不变
-        await guard(openSong)(state.activeSong.id, state.difficulty);
-      } else if (job.error) toast(job.error, "error");
+      if (state.jobStream === source) state.jobStream = null;
+      await guard(handleTerminalJob)(job);
     }
   };
   source.onerror = async () => {
     source.close();
-    state.jobStream = null;
+    if (state.jobStream === source) state.jobStream = null;
+    if (state.jobId !== watchedJobId || !state.jobRunning) return;
     try {
-      const job = await api(`/api/jobs/${state.jobId}`);
+      const job = await api(`/api/jobs/${watchedJobId}`);
+      if (state.jobId !== watchedJobId) return;
       renderJob(job);
       if (["completed", "failed", "cancelled"].includes(job.status)) {
-        state.jobRunning = false;
-        $("cancelButton").classList.add("hidden");
+        await handleTerminalJob(job);
       } else {
         state.jobTimer = setTimeout(watchJob, 1000);
       }
@@ -401,8 +602,16 @@ function bind() {
   $("saveSweepButton").addEventListener("click", guard(saveSweep));
   $("runButton").addEventListener("click", guard(startJob));
   $("cancelButton").addEventListener("click", guard(cancelJob));
-  $("meterEditor").addEventListener("input", () => updateDirty("meter"));
-  $("sweepEditor").addEventListener("input", () => updateDirty("sweep"));
+  $("meterEditor").addEventListener("input", () => {
+    state.editorRevision += 1;
+    updateDirty("meter");
+  });
+  $("sweepEditor").addEventListener("input", () => {
+    state.editorRevision += 1;
+    updateDirty("sweep");
+    updateSweepMeasureGutter();
+  });
+  $("sweepEditor").addEventListener("scroll", syncSweepMeasureGutter);
   document.addEventListener("keydown", event => {
     if (event.key !== "Escape") return;
     // 优先关闭设置面板，其次关闭工作区（有未保存修改时先确认）

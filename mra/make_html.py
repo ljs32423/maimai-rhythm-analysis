@@ -242,11 +242,16 @@ def generate_html(song_dir, song_id, diff_id=5, offset=0.0):
         print(f'  [{song_id}] 无 {svg_path.relative_to(song_root) if svg_path.is_relative_to(song_root) else svg_path}, 请先运行 visualize.py -f'); return
 
     song = parse_maidata(maidata)
-    sweep_path, sweep_created = ensure_sweep_maidata_for_song(song_root, song)
-    if sweep_created:
-        print(f'  [{song_id}] 已创建人工扫键标记文件 {sweep_path.name}')
     if diff_id not in song.charts:
         print(f'  [{song_id}] 无难度 {diff_name}'); return
+    sweep_path, sweep_created = ensure_sweep_maidata_for_song(
+        song_root, song, diff_id,
+    )
+    if sweep_created:
+        print(
+            f'  [{song_id}] 已创建人工扫键标记文件 '
+            f'{sweep_path.relative_to(song_root)}',
+        )
     ch = song.charts[diff_id]
     if not ch.notes:
         return

@@ -12,7 +12,7 @@ from pathlib import Path
 from typing import Callable
 
 from .align_audio import align_song
-from .difficulty import find_preview_video, offset_file_path
+from .difficulty import find_preview_video
 from .export_player import export_player
 from .init_meter import process_song as init_meter
 from .make_html import generate_html
@@ -67,15 +67,13 @@ def analyze(song_dir: Path, difficulty: int, force: bool,
 
     _run_step(3, total, "preview", ensure_preview)
 
-    def ensure_alignment():
-        if offset_file_path(song_dir, difficulty).is_file():
-            return "existing"
-        result = align_song(str(song_dir), song_dir.name, difficulty, force=False)
+    def refresh_alignment():
+        result = align_song(str(song_dir), song_dir.name, difficulty, force=True)
         if result is None:
             raise RuntimeError("audio alignment failed")
         return result
 
-    _run_step(4, total, "alignment", ensure_alignment)
+    _run_step(4, total, "alignment", refresh_alignment)
     _run_step(5, total, "html",
               lambda: generate_html(str(song_dir), song_dir.name, difficulty, 0.0))
     return _run_step(6, total, "player_export",

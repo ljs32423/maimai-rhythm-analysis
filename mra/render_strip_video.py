@@ -114,7 +114,7 @@ def _source_fingerprint(song_dir: Path, diff_id: int) -> str:
     }, sort_keys=True).encode("utf-8"))
     sources = (
         song_dir / "maidata.txt",
-        sweep_maidata_path(song_dir),
+        sweep_maidata_path(song_dir, diff_id),
         meter_file_path(song_dir, diff_id),
     )
     for path in sources:
@@ -373,7 +373,7 @@ def render_strip_video(song_dir, diff_id=5, force=False):
     if not chart.notes:
         return None
 
-    ensure_sweep_maidata_for_song(song_root, song)
+    ensure_sweep_maidata_for_song(song_root, song, diff_id)
     fingerprint = _source_fingerprint(song_root, diff_id)
     output_path = strip_video_path(song_root, diff_id)
 

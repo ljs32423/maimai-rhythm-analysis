@@ -96,7 +96,13 @@
             <h3>扫键标记谱面</h3>
             <button id="saveSweepButton">保存扫键标记</button>
           </div>
-          <textarea id="sweepEditor" spellcheck="false"></textarea>
+          <div class="sweep-editor-frame">
+            <div id="sweepMeasureGutter" class="sweep-measure-gutter"
+                 title="小节号（从首个实际音符开始）"
+                 aria-hidden="true"><pre id="sweepMeasureNumbers"></pre></div>
+            <textarea id="sweepEditor" spellcheck="false" wrap="off"
+                      aria-label="扫键标记谱面；左侧显示小节号"></textarea>
+          </div>
         </section>
       </div>
       <section class="panel job-panel">

@@ -9,7 +9,11 @@ from unittest import mock
 from fastapi import HTTPException
 from fastapi.testclient import TestClient
 
+from mra.difficulty import (legacy_sweep_maidata_path,
+                            sweep_maidata_path)
 from mra.simai_parser import parse_maidata_content
+from mra.sweep_marks import (extract_sweep_difficulty,
+                             sweep_maidata_semantically_equal)
 from mra.web_app import _atomic_text, _safe_song, create_app
 
 
@@ -20,6 +24,11 @@ MAIDATA = """&title=Web Test
 &lv_5=13+
 &des_5=Chart Author
 &inote_5=(150){4}1,2,3,E
+"""
+
+MULTI_MAIDATA = MAIDATA + """&lv_6=14+
+&des_6=Another Author
+&inote_6=(150){4}4,5,6,E
 """
 
 
@@ -44,6 +53,7 @@ class WebAppTests(unittest.TestCase):
         song = response.json()["songs"][0]
         self.assertEqual(song["title"], "Web Test")
         self.assertEqual(song["difficulties"][0]["id"], 5)
+        self.assertFalse(song["difficulties"][0]["outputs"]["sweep"])
 
     def test_meter_can_be_saved_and_reloaded(self):
         payload = {
@@ -62,33 +72,122 @@ class WebAppTests(unittest.TestCase):
         self.assertEqual(loaded["data"]["sections"][1]["signature"], "7/8")
 
     def test_sweep_file_is_validated_and_saved(self):
-        marked = MAIDATA.replace("1,2,3,E", "1/S,2,3,E")
+        displayed = self.client.get("/api/songs/Web%20Test/sweep/5").json()["content"]
+        marked = displayed.replace("1,2,3", "1/S,2,3")
         with mock.patch(
             "mra.web_app.parse_maidata_content",
             wraps=parse_maidata_content,
         ) as parse_content:
             response = self.client.put(
-                "/api/songs/Web%20Test/sweep", json={"content": marked},
+                "/api/songs/Web%20Test/sweep/5", json={"content": marked},
             )
         self.assertEqual(response.status_code, 200)
-        parse_content.assert_called_once_with(marked)
-        self.assertEqual(response.json()["markers"], 1)
+        parse_content.assert_any_call(marked)
+        saved = response.json()
+        self.assertEqual(saved["markers"], 1)
+        self.assertEqual(saved["content"], marked)
         self.assertEqual(
-            self.client.get("/api/songs/Web%20Test/sweep").json()["content"],
+            sweep_maidata_path(self.song, 5).read_text(encoding="utf-8"),
             marked,
         )
+        self.assertEqual(
+            self.client.get("/api/songs/Web%20Test/sweep/5").json()["content"],
+            marked,
+        )
+
+    def test_each_difficulty_uses_an_independent_sweep_file(self):
+        (self.song / "maidata.txt").write_text(MULTI_MAIDATA, encoding="utf-8")
+
+        master = self.client.get("/api/songs/Web%20Test/sweep/5").json()
+        remaster = self.client.get("/api/songs/Web%20Test/sweep/6").json()
+
+        self.assertEqual(master["difficulty"], 5)
+        self.assertEqual(remaster["difficulty"], 6)
+        self.assertEqual(master["source"], "maidata")
+        self.assertEqual(remaster["source"], "maidata")
+        self.assertIn("&inote_5=", master["content"])
+        self.assertNotIn("&inote_6=", master["content"])
+        self.assertIn("&inote_6=", remaster["content"])
+        self.assertNotIn("&inote_5=", remaster["content"])
+
+        marked = master["content"].replace("1,2,3", "1/S,2,3")
+        saved = self.client.put(
+            "/api/songs/Web%20Test/sweep/5", json={"content": marked},
+        )
+
+        self.assertEqual(saved.status_code, 200)
+        self.assertTrue(sweep_maidata_path(self.song, 5).is_file())
+        self.assertFalse(sweep_maidata_path(self.song, 6).exists())
+        self.assertFalse(legacy_sweep_maidata_path(self.song).exists())
+        self.assertEqual(
+            self.client.get("/api/songs/Web%20Test/sweep/6").json()["content"],
+            remaster["content"],
+        )
+
+    def test_sweep_payload_must_match_route_difficulty(self):
+        (self.song / "maidata.txt").write_text(MULTI_MAIDATA, encoding="utf-8")
+
+        wrong = self.client.put(
+            "/api/songs/Web%20Test/sweep/5",
+            json={"content": MULTI_MAIDATA},
+        )
+
+        self.assertEqual(wrong.status_code, 422)
+        self.assertIn("只包含难度 5", wrong.json()["detail"])
+        self.assertEqual(
+            self.client.get("/api/songs/Web%20Test/sweep/7").status_code,
+            404,
+        )
+        self.assertEqual(
+            self.client.get("/api/songs/Web%20Test/sweep").status_code,
+            400,
+        )
+
+    def test_legacy_aggregate_is_projected_read_only_then_saved_separately(self):
+        (self.song / "maidata.txt").write_text(MULTI_MAIDATA, encoding="utf-8")
+        legacy_content = MULTI_MAIDATA.replace(
+            "1,2,3,E", "1/S,2,3,E",
+        ).replace("4,5,6,E", "4/S,5,6,E")
+        legacy_path = legacy_sweep_maidata_path(self.song)
+        legacy_path.write_bytes(legacy_content.replace("\n", "\r\n").encode("utf-8"))
+        preserved = legacy_path.read_bytes()
+
+        master = self.client.get("/api/songs/Web%20Test/sweep/5").json()
+
+        self.assertFalse(master["exists"])
+        self.assertEqual(master["source"], "legacy")
+        self.assertIn("1/S,2,3", master["content"])
+        self.assertNotIn("&inote_6=", master["content"])
+        self.assertTrue(sweep_maidata_semantically_equal(
+            extract_sweep_difficulty(legacy_content, 5), master["content"],
+        ))
+        self.assertEqual(legacy_path.read_bytes(), preserved)
+
+        saved = self.client.put(
+            "/api/songs/Web%20Test/sweep/5",
+            json={"content": master["content"]},
+        )
+
+        self.assertEqual(saved.status_code, 200)
+        self.assertTrue(sweep_maidata_path(self.song, 5).is_file())
+        self.assertFalse(sweep_maidata_path(self.song, 6).exists())
+        self.assertEqual(legacy_path.read_bytes(), preserved)
+        remaster = self.client.get("/api/songs/Web%20Test/sweep/6").json()
+        self.assertEqual(remaster["source"], "legacy")
+        self.assertIn("4/S,5,6", remaster["content"])
 
     def test_sweep_editor_cannot_change_chart_structure(self):
         changed = MAIDATA.replace("1,2,3,E", "1,2,4,E")
         response = self.client.put(
-            "/api/songs/Web%20Test/sweep", json={"content": changed},
+            "/api/songs/Web%20Test/sweep/5", json={"content": changed},
         )
         self.assertEqual(response.status_code, 422)
-        self.assertFalse((self.song / "maidata_sweep.txt").exists())
+        self.assertFalse(sweep_maidata_path(self.song, 5).exists())
 
     def test_sweep_save_tolerates_temp_cleanup_failure(self):
         # 杀毒软件锁定或沙箱拦截删除时，清理临时文件失败不应使保存失败
-        marked = MAIDATA.replace("1,2,3,E", "1/S,2,3,E")
+        displayed = self.client.get("/api/songs/Web%20Test/sweep/5").json()["content"]
+        marked = displayed.replace("1,2,3", "1/S,2,3")
         real_unlink = Path.unlink
 
         def flaky_unlink(self, *args, **kwargs):
@@ -98,13 +197,51 @@ class WebAppTests(unittest.TestCase):
 
         with mock.patch.object(Path, "unlink", flaky_unlink):
             response = self.client.put(
-                "/api/songs/Web%20Test/sweep", json={"content": marked},
+                "/api/songs/Web%20Test/sweep/5", json={"content": marked},
             )
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.json()["markers"], 1)
         self.assertEqual(
-            self.client.get("/api/songs/Web%20Test/sweep").json()["content"],
+            self.client.get("/api/songs/Web%20Test/sweep/5").json()["content"],
             marked,
+        )
+
+    def test_sweep_get_reflows_variable_meter_without_writing_source(self):
+        coarse = MAIDATA.replace("(150){4}1,2,3,E", "(150){2}1,2,3,E")
+        (self.song / "maidata.txt").write_text(coarse, encoding="utf-8")
+        meter = {
+            "data": {
+                "default": "4/4",
+                "sections": [
+                    {"start_beat": 0, "signature": "4/4"},
+                    {"start_beat": 5, "signature": "3/4"},
+                ],
+            },
+        }
+        self.assertEqual(
+            self.client.put(
+                "/api/songs/Web%20Test/meter/5", json=meter,
+            ).status_code,
+            200,
+        )
+
+        response = self.client.get("/api/songs/Web%20Test/sweep/5")
+
+        self.assertEqual(response.status_code, 200)
+        content = response.json()["content"]
+        self.assertFalse(response.json()["exists"])
+        self.assertFalse(sweep_maidata_path(self.song, 5).exists())
+        self.assertIn('1,2,\n3{#0.4},\n{#0.4},\nE', content)
+        self.assertTrue(sweep_maidata_semantically_equal(coarse, content))
+
+        saved = self.client.put(
+            "/api/songs/Web%20Test/sweep/5", json={"content": content},
+        )
+        self.assertEqual(saved.status_code, 200)
+        self.assertEqual(saved.json()["content"], content)
+        self.assertEqual(
+            sweep_maidata_path(self.song, 5).read_text(encoding="utf-8"),
+            content,
         )
 
     def test_atomic_text_reports_real_error_when_cleanup_fails(self):
@@ -156,12 +293,12 @@ class WebAppTests(unittest.TestCase):
             side_effect=PermissionError(errno.EACCES, "simulated file lock"),
         ):
             response = self.client.put(
-                "/api/songs/Web%20Test/sweep", json={"content": marked},
+                "/api/songs/Web%20Test/sweep/5", json={"content": marked},
             )
 
         self.assertEqual(response.status_code, 503)
         self.assertIn("请稍后重试", response.json()["detail"])
-        self.assertFalse((self.song / "maidata_sweep.txt").exists())
+        self.assertFalse(sweep_maidata_path(self.song, 5).exists())
 
     def test_invalid_meter_is_rejected_without_overwriting(self):
         response = self.client.put(

@@ -124,11 +124,32 @@ textarea {
   display: block; width: 100%; min-height: 420px; resize: vertical; padding: 14px;
   font: 13px/1.6 Consolas, "Microsoft YaHei", monospace; outline: none;
 }
+.sweep-editor-frame {
+  display: grid; grid-template-columns: 58px minmax(0, 1fr); align-items: stretch;
+}
+.sweep-editor-frame textarea {
+  min-width: 0; border-radius: 0 11px 11px 0;
+}
+.sweep-measure-gutter {
+  position: relative; min-height: 420px; overflow: hidden; user-select: none;
+  border: 1px solid rgba(148, 158, 187, .25); border-right: 0;
+  border-radius: 11px 0 0 11px; background: rgba(255, 255, 255, .035);
+  color: var(--cyan);
+}
+.sweep-measure-gutter pre {
+  position: absolute; top: 0; right: 0; left: 0; margin: 0; padding: 14px 10px;
+  color: inherit; background: transparent; text-align: right; white-space: pre;
+  font: 700 13px/1.6 Consolas, "Microsoft YaHei", monospace;
+  will-change: transform;
+}
+.sweep-editor-frame:focus-within .sweep-measure-gutter {
+  border-color: var(--cyan); box-shadow: -2px 0 0 0 rgba(73, 215, 255, .25);
+}
 .job-panel { margin-top: 16px; padding: 16px; }
 .progress { height: 8px; border-radius: 999px; overflow: hidden; background: rgba(255,255,255,.08); }
 .progress span { display: block; width: 0; height: 100%; background: linear-gradient(90deg, var(--accent), var(--cyan)); transition: width .25s; }
 .job-line { display: flex; justify-content: space-between; align-items: center; margin: 12px 0; }
-pre { max-height: 300px; overflow: auto; margin: 0; padding: 14px; border-radius: 12px; background: #05060a; color: #b9c2d8; white-space: pre-wrap; }
+.job-panel pre { max-height: 300px; overflow: auto; margin: 0; padding: 14px; border-radius: 12px; background: #05060a; color: #b9c2d8; white-space: pre-wrap; }
 .settings { padding: 18px; margin-top: 16px; }
 .settings .section-heading { margin-top: 0; }
 .settings-grid { display: grid; grid-template-columns: repeat(5, 1fr); gap: 12px; margin-bottom: 14px; }

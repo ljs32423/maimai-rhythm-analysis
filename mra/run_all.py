@@ -15,7 +15,9 @@ maimai 节奏解析 一键生成
   python run_all.py                            # 批量所有歌曲 (默认 MASTER/Re:MASTER)
   python run_all.py -d "WiPE OUT MEMORIES"     # 单曲
   python run_all.py -diff 4                    # 指定难度
-  python run_all.py -f                         # 强制重建可视化，保留人工配置与媒体
+  python run_all.py -f                         # 强制重建可视化，保留人工配置与视频
+
+每次完整处理都会强制重新计算音频延迟并覆盖对应的 offset.txt。
 """
 import os, sys, argparse, subprocess
 from datetime import datetime
@@ -70,7 +72,7 @@ def main():
                     help='难度 ID；不指定则默认只处理 MASTER/Re:MASTER')
     ap.add_argument(
         '-f', '--force', action='store_true',
-        help='强制重建可视化；保留扫键标记、拍号、视频与音频对齐结果',
+        help='强制重建可视化；保留扫键标记、拍号与视频',
     )
     ap.add_argument('-offset', '--offset', type=float, default=0.0, help='初始延迟 (秒)')
     args = ap.parse_args()
@@ -84,8 +86,8 @@ def main():
 
     common = ['-i', args.input] if args.input else []
 
-    # 六个步骤: (名称, 脚本路径, 是否传递 -f, 是否附加 offset)
-    # 人工扫键标记、拍号、预览视频和音频对齐结果都不响应 run_all -f。
+    # 六个步骤: (名称, 脚本路径, 是否响应用户 -f, 是否附加 offset)
+    # 音频对齐无论用户是否传入 -f，每次完整处理都必须强制重新计算。
     steps = [
         ('1/6 拍号文件', 'mra.init_meter', False, False),
         ('2/6 节奏解析图片', 'mra.visualize', True, False),
@@ -104,7 +106,7 @@ def main():
                 step_args = common + ['-d', song.path.name, '-diff', str(difficulty)]
                 if needs_offset:
                     step_args += ['-offset', str(args.offset)]
-                force = args.force and accept_force
+                force = script == 'mra.align_audio' or (args.force and accept_force)
                 step_ok = run_step(name, script, step_args, force)
                 diff_ok = diff_ok and step_ok
                 ok_all = ok_all and step_ok

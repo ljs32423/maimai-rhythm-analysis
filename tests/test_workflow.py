@@ -17,7 +17,7 @@ import mra.visualize as visualize
 from mra.difficulty import (analysis_html_path, difficulty_file_stem, difficulty_name,
                             find_preview_video, offset_file_path, preview_video_path,
                             preview_video_candidates, rhythm_png_path, rhythm_svg_path,
-                            strip_svg_path)
+                            strip_svg_path, sweep_maidata_path)
 from mra.meter import MeterMap
 from mra.simai_parser import Chart, Note, NoteType, parse_inote
 from mra.song_library import SongFolder, discover_song_folders, safe_folder_name
@@ -269,6 +269,30 @@ class WorkflowTests(unittest.TestCase):
         self.assertTrue({"answer", "judge", "touch", "hanabi"} <= events[1.0])
         self.assertIn("break_slide_start", events[1.5])
         self.assertEqual(events[2.0], {"break_slide", "judge_break_slide"})
+
+    def test_simultaneous_touch_notes_share_one_touch_sound(self):
+        chart = {
+            "timingList": [
+                {
+                    "time": 1.0,
+                    "noteList": [
+                        {"noteType": 3, "isHanabi": False},
+                        {"noteType": 3, "isHanabi": True},
+                        {"noteType": 4, "holdTime": 0.0, "isHanabi": False},
+                    ],
+                },
+                {
+                    # Duplicate timing groups must also collapse to one cue.
+                    "time": 1.0,
+                    "noteList": [{"noteType": 3, "isHanabi": False}],
+                },
+            ],
+        }
+
+        events, touch_holds = render_preview.build_key_sound_events(chart)
+
+        self.assertEqual(touch_holds, [])
+        self.assertEqual(events[1.0], {"answer", "hanabi", "touch"})
 
     def test_key_sound_mixer_adds_lead_in_and_note_audio(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -1114,7 +1138,9 @@ class WorkflowTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             (root / "maidata.txt").write_text(MAIDATA_WITH_REMASTER, encoding="utf-8")
-            (root / "maidata_sweep.txt").write_text(
+            sweep_path = sweep_maidata_path(root, 6)
+            sweep_path.parent.mkdir(parents=True, exist_ok=True)
+            sweep_path.write_text(
                 MAIDATA_WITH_REMASTER,
                 encoding="utf-8",
             )
@@ -1144,7 +1170,12 @@ class WorkflowTests(unittest.TestCase):
             self.assertEqual(render_strip_video.strip_video_path(root, 6), video)
             self.assertTrue(render_strip_video.strip_video_is_current(root, 6))
 
-            (root / "maidata_sweep.txt").write_text(
+            unrelated_sweep = sweep_maidata_path(root, 5)
+            unrelated_sweep.parent.mkdir(parents=True, exist_ok=True)
+            unrelated_sweep.write_text("unrelated", encoding="utf-8")
+            self.assertTrue(render_strip_video.strip_video_is_current(root, 6))
+
+            sweep_path.write_text(
                 MAIDATA_WITH_REMASTER + "\n",
                 encoding="utf-8",
             )
@@ -1551,7 +1582,7 @@ class WorkflowTests(unittest.TestCase):
                 html.index('"src": "../video/preview.mp4"'),
             )
 
-    def test_run_all_force_defaults_to_false(self):
+    def test_run_all_always_forces_audio_alignment(self):
         selected = [SongFolder(Path("song"), "song", "song")]
         with mock.patch.object(sys, "argv", ["run_all.py"]), \
              mock.patch.object(run_all, "discover_song_folders", return_value=selected), \
@@ -1559,14 +1590,17 @@ class WorkflowTests(unittest.TestCase):
              mock.patch.object(run_all, "run_step", return_value=True) as run_step:
             result = run_all.main()
         self.assertEqual(result, 0)
-        self.assertTrue(all(call.args[3] is False for call in run_step.call_args_list))
+        self.assertEqual(
+            [call.args[3] for call in run_step.call_args_list],
+            [False, False, False, True, False, False],
+        )
         self.assertEqual(len(run_step.call_args_list), 6)
         self.assertEqual(run_step.call_args_list[1].args[2], ['-d', 'song', '-diff', '5'])
         self.assertEqual(run_step.call_args_list[2].args[2], ['-d', 'song', '-diff', '5'])
         self.assertEqual(run_step.call_args_list[3].args[2], ['-d', 'song', '-diff', '5'])
         self.assertEqual(run_step.call_args_list[4].args[2], ['-d', 'song', '-diff', '5', '-offset', '0.0'])
 
-    def test_run_all_force_preserves_meter_video_and_audio_alignment(self):
+    def test_run_all_force_preserves_meter_and_video_but_realigns_audio(self):
         selected = [SongFolder(Path("song"), "song", "song")]
         with mock.patch.object(sys, "argv", ["run_all.py", "-f"]), \
              mock.patch.object(run_all, "discover_song_folders", return_value=selected), \
@@ -1577,7 +1611,7 @@ class WorkflowTests(unittest.TestCase):
         self.assertEqual(result, 0)
         self.assertEqual(
             [call.args[3] for call in run_step.call_args_list],
-            [False, True, False, False, True, True],
+            [False, True, False, True, True, True],
         )
 
     def test_run_all_returns_failure_when_a_step_fails(self):

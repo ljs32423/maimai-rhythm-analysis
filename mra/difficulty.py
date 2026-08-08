@@ -68,8 +68,15 @@ def meter_file_path(song_dir: str | Path, difficulty_id: int) -> Path:
     return difficulty_output_path(song_dir, difficulty_id, "meter", "meter.json")
 
 
-def sweep_maidata_path(song_dir: str | Path) -> Path:
-    """返回歌曲级人工扫键标记谱面路径。"""
+def sweep_maidata_path(song_dir: str | Path, difficulty_id: int) -> Path:
+    """返回该难度独立的人工扫键标记谱面路径。"""
+    return difficulty_output_path(
+        song_dir, difficulty_id, "sweep", "maidata_sweep.txt",
+    )
+
+
+def legacy_sweep_maidata_path(song_dir: str | Path) -> Path:
+    """返回旧版歌曲级扫键谱面路径，仅用于无损迁移。"""
     return Path(song_dir) / "maidata_sweep.txt"
 
 

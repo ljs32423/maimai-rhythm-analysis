@@ -130,7 +130,7 @@ def _file_fingerprints(song_dir: Path, difficulty: int,
                        preview: Path | None, offset: Path | None) -> dict[str, Any]:
     maidata = song_dir / "maidata.txt"
     meter = meter_file_path(song_dir, difficulty)
-    sweep_maidata = sweep_maidata_path(song_dir)
+    sweep_maidata = sweep_maidata_path(song_dir, difficulty)
     result: dict[str, Any] = {
         "maidata_sha256": _sha256(maidata),
         "sweep_maidata_sha256": _sha256(sweep_maidata),
@@ -158,7 +158,7 @@ def export_player(song_dir: str | Path, difficulty: int,
     chart = song.charts[difficulty]
     if not chart.notes:
         raise ValueError(f"{song.title} difficulty {difficulty} contains no notes")
-    ensure_sweep_maidata_for_song(song_root, song)
+    ensure_sweep_maidata_for_song(song_root, song, difficulty)
 
     first_note_time = min(note.time_sec for note in chart.notes)
     first_note_beat = time_to_beat(first_note_time, chart.bpm_timeline)

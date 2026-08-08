@@ -15,6 +15,7 @@ release/
 *.zip
 .cache/
 .workbuddy/
+*.lnk
 .mra-web-instance.json
 config.json
 

@@ -262,11 +262,22 @@ def build_key_sound_events(chart_data: dict) -> tuple[dict[float, set[str]], lis
     """Translate official Majdata note JSON into its recording SFX timeline."""
     events: dict[float, set[str]] = {}
     touch_holds: list[tuple[float, float]] = []
+    # Touch uses one shared cue per judgement time.  Keep it separate from the
+    # per-note event walk so simultaneous Touch / Touch Hold notes can never
+    # stack multiple copies of touch.wav.
+    touch_sound_times: set[float] = set()
+
+    def time_key(at: float) -> float:
+        return round(float(at), 6)
 
     def add(at: float, *sounds: str):
         if at < 0:
             return
-        events.setdefault(round(float(at), 6), set()).update(sounds)
+        events.setdefault(time_key(at), set()).update(sounds)
+
+    def add_touch_sound(at: float):
+        if at >= 0:
+            touch_sound_times.add(time_key(at))
 
     def add_head(at: float, note: dict):
         add(at, "answer")
@@ -297,17 +308,22 @@ def build_key_sound_events(chart_data: dict) -> tuple[dict[float, set[str]], lis
                     slide_end = slide_start + float(note.get("slideTime", 0.0))
                     add(slide_end, "break_slide", "judge_break_slide")
             elif note_type == 3:  # Touch
-                add(at, "answer", "touch")
+                add(at, "answer")
+                add_touch_sound(at)
                 if note.get("isHanabi"):
                     add(at, "hanabi")
             elif note_type == 4:  # Touch Hold
                 duration = max(0.0, float(note.get("holdTime", 0.0)))
-                add(at, "answer", "touch")
+                add(at, "answer")
+                add_touch_sound(at)
                 if duration:
                     touch_holds.append((at, at + duration))
                     add(at + duration, "answer")
                     if note.get("isHanabi"):
                         add(at + duration, "hanabi")
+
+    for at in touch_sound_times:
+        add(at, "touch")
 
     return events, touch_holds
 

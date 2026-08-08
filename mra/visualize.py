@@ -34,7 +34,7 @@ from .simai_parser import (parse_maidata, NoteType, Note, Chart, SongData,
 from .difficulty import (DIFFICULTY_NAMES, default_target_difficulties,
                          difficulty_file_stem, legacy_difficulty_path,
                          rhythm_png_path, rhythm_svg_path, strip_segment_base_path,
-                         strip_svg_path, sweep_maidata_path)
+                         strip_svg_path)
 from .meter import MeterMap, ensure_meter_file
 from .song_library import PROJECT_ROOT, find_song_dirs
 from .sweep_marks import apply_sweep_maidata, ensure_sweep_maidata
@@ -691,20 +691,19 @@ def compute_rhythm_events(chart: Chart):
 
 
 def ensure_sweep_maidata_for_song(song_dir: str | Path,
-                                  song: SongData) -> tuple[Path, bool]:
-    """首次创建人工谱时，用机器结果一次性初始化所有难度的 /S。"""
-    existing = sweep_maidata_path(song_dir)
-    if existing.is_file():
-        return existing, False
-    sweep_times_by_difficulty = {}
-    for difficulty, chart in song.charts.items():
-        events = compute_rhythm_events(chart)
-        sweep_times_by_difficulty[difficulty] = [
-            float(event['time'])
-            for event in events
-            if event.get('is_sweep_start')
-        ]
-    return ensure_sweep_maidata(song_dir, sweep_times_by_difficulty)
+                                  song: SongData,
+                                  difficulty: int) -> tuple[Path, bool]:
+    """首次创建当前难度人工谱时，用机器结果初始化 /S。"""
+    chart = song.charts.get(difficulty)
+    if chart is None:
+        raise ValueError(f'歌曲中没有难度 {difficulty}')
+    events = compute_rhythm_events(chart)
+    sweep_times = [
+        float(event['time'])
+        for event in events
+        if event.get('is_sweep_start')
+    ]
+    return ensure_sweep_maidata(song_dir, difficulty, sweep_times)
 
 
 # ============ 几何常量 ============
@@ -1428,10 +1427,6 @@ def process_song(song_dir, song_id, force=False, difficulties=None):
     except Exception as e:
         return {'song_id': song_id, 'error': f'parse: {e}'}
 
-    sweep_path, sweep_created = ensure_sweep_maidata_for_song(song_dir, song)
-    if sweep_created:
-        print(f'  [{song_id}] 已创建人工扫键标记文件 {sweep_path.name}')
-
     selected_difficulties = (sorted(song.charts) if difficulties is None
                              else [did for did in difficulties if did in song.charts])
     stats = {'song_id': song_id, 'title': song.title, 'artist': song.artist,
@@ -1444,6 +1439,9 @@ def process_song(song_dir, song_id, force=False, difficulties=None):
         segment_base = strip_segment_base_path(song_dir, did)
         events = compute_rhythm_events(ch)
         sweep_result = apply_sweep_maidata(events, song_dir, did)
+        if sweep_result.created:
+            relative = sweep_result.path.relative_to(Path(song_dir))
+            print(f'  [{song_id}] 已创建人工扫键标记文件 {relative}')
         for warning in sweep_result.warnings:
             print(f'  [{song_id}] 扫键标记警告: {warning}')
         # 先读取或初始化拍号文件，让所有输出共用同一份人工小节时间轴。

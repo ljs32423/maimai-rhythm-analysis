@@ -5,6 +5,7 @@ from pathlib import Path
 from unittest import mock
 
 from mra import desktop_backend
+from mra.difficulty import sweep_maidata_path
 from mra.export_player import SCHEMA_VERSION, export_player
 from mra.visualize import SWEEP_RING_COLOR
 
@@ -81,7 +82,7 @@ class PlayerExportTests(unittest.TestCase):
             first_manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
             first_hash = first_manifest["input_fingerprints"]["sweep_maidata_sha256"]
 
-            sweep_maidata = song / "maidata_sweep.txt"
+            sweep_maidata = sweep_maidata_path(song, 5)
             sweep_maidata.write_text(
                 sweep_maidata.read_text(encoding="utf-8").replace("1,A1", "1/S,A1"),
                 encoding="utf-8",
@@ -129,6 +130,22 @@ class PlayerExportTests(unittest.TestCase):
             lines = [json.loads(line) for line in emitted.splitlines() if line.strip()]
             self.assertEqual(lines[0]["event"], "started")
             self.assertEqual(lines[-1]["event"], "completed")
+
+    def test_backend_full_analysis_realigns_even_when_offset_exists(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            song = self.make_song(Path(tmp))
+            with mock.patch.object(desktop_backend, "init_meter"), \
+                 mock.patch.object(desktop_backend, "visualize_song", return_value={}), \
+                 mock.patch.object(desktop_backend, "find_preview_video", return_value="preview.mp4"), \
+                 mock.patch.object(desktop_backend, "align_song", return_value=0.25) as align_song, \
+                 mock.patch.object(desktop_backend, "generate_html", return_value=Path("analysis.html")), \
+                 mock.patch.object(desktop_backend, "export_player", return_value=Path("manifest.json")):
+                result = desktop_backend.analyze(song, 5, force=False, timeout=900)
+
+            self.assertEqual(result, Path("manifest.json"))
+            align_song.assert_called_once_with(
+                str(song), song.name, 5, force=True,
+            )
 
 
 if __name__ == "__main__":
