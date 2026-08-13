@@ -41,7 +41,7 @@ from .visualize import (
 from .sweep_marks import apply_sweep_maidata
 
 SCHEMA_VERSION = 1
-EXPORTER_REVISION = 2
+EXPORTER_REVISION = 3
 
 
 def _sha256(path: Path) -> str | None:
@@ -164,6 +164,9 @@ def export_player(song_dir: str | Path, difficulty: int,
 
     last_note_time = max(note.time_sec + note.duration_sec for note in chart.notes)
     last_note_beat = time_to_beat(last_note_time, chart.bpm_timeline)
+    last_note_start_beat = max(
+        time_to_beat(note.time_sec, chart.bpm_timeline) for note in chart.notes
+    )
     meter_map = ensure_meter_file(song_root, difficulty, last_note_beat)
     folded_total_beats = meter_map.add_measures(last_note_beat, 1)
     total_beats = meter_map.add_measures(folded_total_beats, LONG_IMAGE_EXTRA_MEASURES)
@@ -244,6 +247,10 @@ def export_player(song_dir: str | Path, difficulty: int,
             "measure_boundaries": [round(value, 9)
                                    for value in meter_map.numbered_boundaries(
                                        last_note_beat,
+                                       include_end=math.isclose(
+                                           last_note_start_beat, last_note_beat,
+                                           rel_tol=0.0, abs_tol=1e-6,
+                                       ),
                                    )],
             "meter_sections": meter_map.signature_sections(),
         },

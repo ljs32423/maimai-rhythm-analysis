@@ -111,9 +111,14 @@ class MeterMap:
         return any(abs(boundary - beat) <= tolerance
                    for boundary in self.boundaries(beat - tolerance, beat + tolerance))
 
-    def numbered_boundaries(self, end_beat: float) -> list[float]:
-        """返回从谱面 beat 0 开始编号的小节起点，包括首音前的空小节。"""
-        boundaries = self.boundaries(0.0, max(0.0, end_beat))
+    def numbered_boundaries(self, end_beat: float, *,
+                            include_end: bool = False) -> list[float]:
+        """返回谱面实际占用的小节起点；默认不把结束线算作下一小节。"""
+        normalized_end = max(0.0, end_beat)
+        boundaries = self.boundaries(0.0, normalized_end)
+        if (not include_end and normalized_end > EPSILON and boundaries
+                and abs(boundaries[-1] - normalized_end) <= EPSILON):
+            boundaries.pop()
         if boundaries and abs(boundaries[0]) <= EPSILON:
             boundaries[0] = 0.0
         elif not boundaries or boundaries[0] > EPSILON:

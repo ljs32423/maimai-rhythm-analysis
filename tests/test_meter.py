@@ -47,6 +47,10 @@ class MeterTests(unittest.TestCase):
 
         self.assertEqual(
             meter_map.numbered_boundaries(28.0),
+            [0.0, 7.0, 14.0, 21.0],
+        )
+        self.assertEqual(
+            meter_map.numbered_boundaries(28.0, include_end=True),
             [0.0, 7.0, 14.0, 21.0, 28.0],
         )
 
@@ -58,8 +62,18 @@ class MeterTests(unittest.TestCase):
 
         self.assertEqual(
             meter_map.numbered_boundaries(10.0),
-            [0.0, 2.0, 6.0, 10.0],
+            [0.0, 2.0, 6.0],
         )
+
+    def test_measure_numbering_does_not_count_exact_end_boundary(self):
+        meter_map = MeterMap.from_dict({
+            "sections": [{"start_beat": 0, "signature": "4/4"}],
+        }, total_beats=540)
+
+        boundaries = meter_map.numbered_boundaries(540.0)
+
+        self.assertEqual(len(boundaries), 135)
+        self.assertEqual(boundaries[-1], 536.0)
 
     def test_missing_meter_file_is_initialized_as_editable_4_4_template(self):
         with tempfile.TemporaryDirectory() as tmp:
