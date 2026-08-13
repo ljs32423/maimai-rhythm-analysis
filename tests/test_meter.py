@@ -39,19 +39,26 @@ class MeterTests(unittest.TestCase):
         self.assertEqual(meter_map.measure_at(6.999).signature.label, "4/4")
         self.assertEqual(meter_map.measure_at(7.0).signature.label, "3/4")
 
-    def test_measure_numbering_starts_with_measure_containing_first_note(self):
+    def test_measure_numbering_starts_at_chart_grid(self):
         meter_map = MeterMap.from_dict({
             "default": "7/4",
             "sections": [{"start_beat": 0, "signature": "7/4"}],
         }, total_beats=28)
 
         self.assertEqual(
-            meter_map.numbered_boundaries(7.0, 28.0),
-            [7.0, 14.0, 21.0, 28.0],
+            meter_map.numbered_boundaries(28.0),
+            [0.0, 7.0, 14.0, 21.0, 28.0],
         )
+
+    def test_measure_numbering_keeps_chart_start_without_explicit_zero_anchor(self):
+        meter_map = MeterMap.from_dict({
+            "default": "4/4",
+            "sections": [{"start_beat": 2, "signature": "4/4"}],
+        }, total_beats=10)
+
         self.assertEqual(
-            meter_map.numbered_boundaries(9.0, 28.0),
-            [7.0, 14.0, 21.0, 28.0],
+            meter_map.numbered_boundaries(10.0),
+            [0.0, 2.0, 6.0, 10.0],
         )
 
     def test_missing_meter_file_is_initialized_as_editable_4_4_template(self):

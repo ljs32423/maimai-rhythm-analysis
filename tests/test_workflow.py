@@ -896,7 +896,7 @@ class WorkflowTests(unittest.TestCase):
             self.assertIn('--delay-fill-start: 50%; --delay-fill-end: 50%;', html)
             self.assertIn('rgba(77,208,225,0.14)', html)
 
-    def test_html_measure_one_contains_first_note(self):
+    def test_html_measure_numbering_keeps_empty_measure_before_first_note(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             maidata = MAIDATA_WITH_REMASTER.replace(
@@ -910,8 +910,8 @@ class WorkflowTests(unittest.TestCase):
             output = make_html.generate_html(str(root), "test", diff_id=6)
             html = Path(output).read_text(encoding="utf-8")
 
-            self.assertIn('const MEASURE_BOUNDARIES = [4.0];', html)
-            self.assertIn('<strong id="measureNumber">1</strong><em>/ 1</em>', html)
+            self.assertIn('const MEASURE_BOUNDARIES = [0.0, 4.0];', html)
+            self.assertIn('<strong id="measureNumber">1</strong><em>/ 2</em>', html)
 
     def test_html_rebuilds_and_uses_complete_svg_segments(self):
         with tempfile.TemporaryDirectory() as tmp:

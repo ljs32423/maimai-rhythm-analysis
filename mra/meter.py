@@ -111,22 +111,14 @@ class MeterMap:
         return any(abs(boundary - beat) <= tolerance
                    for boundary in self.boundaries(beat - tolerance, beat + tolerance))
 
-    def numbered_boundaries(self, first_note_beat: float,
-                            end_beat: float) -> list[float]:
-        """返回用于编号的小节起点；首个音符所在小节固定为第 1 小节。"""
-        max_measure_beats = max(
-            measure.signature.measure_beats for measure in self.measures
-        )
-        candidates = self.boundaries(
-            first_note_beat - max_measure_beats - EPSILON,
-            first_note_beat + EPSILON,
-        )
-        starts = [
-            boundary for boundary in candidates
-            if boundary <= first_note_beat + EPSILON
-        ]
-        first_measure_start = starts[-1] if starts else first_note_beat
-        return self.boundaries(first_measure_start, max(first_measure_start, end_beat))
+    def numbered_boundaries(self, end_beat: float) -> list[float]:
+        """返回从谱面 beat 0 开始编号的小节起点，包括首音前的空小节。"""
+        boundaries = self.boundaries(0.0, max(0.0, end_beat))
+        if boundaries and abs(boundaries[0]) <= EPSILON:
+            boundaries[0] = 0.0
+        elif not boundaries or boundaries[0] > EPSILON:
+            boundaries.insert(0, 0.0)
+        return boundaries
 
     def ceil_to_boundary(self, beat: float) -> float:
         span = max(12.0, self.measures[-1].signature.measure_beats * 2)

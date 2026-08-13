@@ -108,7 +108,6 @@ function scanSweepLine(line) {
 
 function sweepMeasureNumbers(content) {
   let inote = false;
-  let numberingStarted = false;
   let measure = 0;
   return content.split("\n").map(line => {
     const field = line.match(/^\s*&inote_[1-7]=(.*)$/);
@@ -116,7 +115,6 @@ function sweepMeasureNumbers(content) {
     const scanned = scanSweepLine(body);
     if (field) {
       inote = true;
-      numberingStarted = false;
       measure = 0;
       if (!body.trim()) return "";
     } else if (/^\s*&/.test(line)) {
@@ -133,13 +131,6 @@ function sweepMeasureNumbers(content) {
     if (pureEnd) {
       inote = false;
       return "";
-    }
-    if (!numberingStarted) {
-      if (!scanned.hasPlayable) {
-        if (scanned.hasTerminalE) inote = false;
-        return "";
-      }
-      numberingStarted = true;
     }
     measure += 1;
     if (scanned.hasTerminalE) inote = false;

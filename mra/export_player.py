@@ -41,6 +41,7 @@ from .visualize import (
 from .sweep_marks import apply_sweep_maidata
 
 SCHEMA_VERSION = 1
+EXPORTER_REVISION = 2
 
 
 def _sha256(path: Path) -> str | None:
@@ -132,6 +133,7 @@ def _file_fingerprints(song_dir: Path, difficulty: int,
     meter = meter_file_path(song_dir, difficulty)
     sweep_maidata = sweep_maidata_path(song_dir, difficulty)
     result: dict[str, Any] = {
+        "exporter_revision": EXPORTER_REVISION,
         "maidata_sha256": _sha256(maidata),
         "sweep_maidata_sha256": _sha256(sweep_maidata),
         "meter_sha256": _sha256(meter),
@@ -160,8 +162,6 @@ def export_player(song_dir: str | Path, difficulty: int,
         raise ValueError(f"{song.title} difficulty {difficulty} contains no notes")
     ensure_sweep_maidata_for_song(song_root, song, difficulty)
 
-    first_note_time = min(note.time_sec for note in chart.notes)
-    first_note_beat = time_to_beat(first_note_time, chart.bpm_timeline)
     last_note_time = max(note.time_sec + note.duration_sec for note in chart.notes)
     last_note_beat = time_to_beat(last_note_time, chart.bpm_timeline)
     meter_map = ensure_meter_file(song_root, difficulty, last_note_beat)
@@ -243,7 +243,7 @@ def export_player(song_dir: str | Path, difficulty: int,
             "bpm_timeline": timings,
             "measure_boundaries": [round(value, 9)
                                    for value in meter_map.numbered_boundaries(
-                                       first_note_beat, last_note_beat,
+                                       last_note_beat,
                                    )],
             "meter_sections": meter_map.signature_sections(),
         },
