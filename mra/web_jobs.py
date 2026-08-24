@@ -62,6 +62,7 @@ class JobManager:
         self.max_jobs = max_jobs
         self._jobs: dict[str, AnalysisJob] = {}
         self._lock = threading.RLock()
+        self._shutdown = False
         self._executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="mra-job")
 
     def submit(self, song_dir: Path, difficulty: int, force: bool = False) -> AnalysisJob:
@@ -72,6 +73,8 @@ class JobManager:
             force=bool(force),
         )
         with self._lock:
+            if self._shutdown:
+                raise RuntimeError("后台任务管理器已经停止")
             self._jobs[job.id] = job
             self._trim()
             job.future = self._executor.submit(self._run, job)
@@ -99,6 +102,34 @@ class JobManager:
         if process and process.poll() is None:
             self._stop_process_tree(process)
         return job
+
+    def shutdown(self) -> None:
+        """Cancel pending work and stop the active subprocess before exit.
+
+        ``ThreadPoolExecutor`` workers are non-daemon threads.  If the web
+        server exits while an analysis is still running, Python otherwise
+        waits for that worker indefinitely and leaves the console window open.
+        """
+        processes: list[subprocess.Popen] = []
+        with self._lock:
+            if self._shutdown:
+                return
+            self._shutdown = True
+            for job in self._jobs.values():
+                if job.status in {"completed", "failed", "cancelled"}:
+                    continue
+                job.cancel_requested = True
+                if job.status == "queued" and job.future and job.future.cancel():
+                    job.status = "cancelled"
+                    job.finished_at = _now()
+                    continue
+                process = job.process
+                if process and process.poll() is None:
+                    processes.append(process)
+
+        for process in processes:
+            self._stop_process_tree(process)
+        self._executor.shutdown(wait=True, cancel_futures=True)
 
     def _trim(self) -> None:
         if len(self._jobs) <= self.max_jobs:
@@ -159,9 +190,17 @@ class JobManager:
                 encoding="utf-8",
                 errors="replace",
                 bufsize=1,
+                creationflags=(
+                    subprocess.CREATE_NEW_PROCESS_GROUP if os.name == "nt" else 0
+                ),
             )
             with self._lock:
                 job.process = process
+                stop_immediately = job.cancel_requested
+            # Cancellation can race with Popen: the process may not have been
+            # published yet when shutdown() inspected the job.
+            if stop_immediately and process.poll() is None:
+                self._stop_process_tree(process)
             assert process.stdout is not None
             for line in process.stdout:
                 self._append_log(job, line)

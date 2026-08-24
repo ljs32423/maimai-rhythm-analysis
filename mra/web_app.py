@@ -16,6 +16,7 @@ import time
 import urllib.parse
 import urllib.request
 import webbrowser
+from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any, Callable, TypeVar
 
@@ -179,6 +180,18 @@ def _cover_path(song_dir: Path) -> Path | None:
     return None
 
 
+def _cover_url(song_dir: Path, cover: Path | None) -> str | None:
+    if cover is None:
+        return None
+    try:
+        source_stat = cover.stat()
+        version = f"{source_stat.st_mtime_ns:x}-{source_stat.st_size:x}"
+    except OSError:
+        version = "0"
+    song_id = urllib.parse.quote(song_dir.name, safe="")
+    return f"/api/songs/{song_id}/cover?v={version}"
+
+
 def _safe_song(root: Path, song_id: str) -> Path:
     decoded = urllib.parse.unquote(song_id)
     if not decoded or Path(decoded).name != decoded or decoded in {".", ".."}:
@@ -234,10 +247,7 @@ def _song_info(song_dir: Path) -> dict[str, Any]:
         "bpm": song.bpm,
         "genre": song.genre,
         "version": song.version,
-        "cover_url": (
-            f"/library/{urllib.parse.quote(song_dir.name)}/{urllib.parse.quote(cover.name)}"
-            if cover else None
-        ),
+        "cover_url": _cover_url(song_dir, cover),
         "sweep_exists": (
             any_difficulty_sweep
             or legacy_sweep_maidata_path(song_dir).is_file()
@@ -302,16 +312,202 @@ def _song_summary(song_dir: Path) -> dict[str, Any]:
         "bpm": bpm,
         "genre": _maidata_field(content, "genre"),
         "version": _maidata_field(content, "version"),
-        "cover_url": (
-            f"/library/{urllib.parse.quote(song_dir.name)}/{urllib.parse.quote(cover.name)}"
-            if cover else None
-        ),
+        "cover_url": _cover_url(song_dir, cover),
         "sweep_exists": (
             any_difficulty_sweep
             or legacy_sweep_maidata_path(song_dir).is_file()
         ),
         "difficulties": difficulties,
     }
+
+
+def _song_catalog_summary(song_dir: Path) -> dict[str, Any]:
+    """Return only the metadata rendered by a card in the song library.
+
+    The full summary probes up to six generated paths for every difficulty.
+    Across a large library that means tens of thousands of filesystem calls,
+    even though the library cards do not render any of those flags.
+    """
+    content = (song_dir / "maidata.txt").read_text(encoding="utf-8-sig")
+    cover = _cover_path(song_dir)
+    levels = {
+        int(match.group(1)): match.group(2).strip()
+        for match in re.finditer(r"^&lv_([1-7])=(.*)$", content, re.MULTILINE)
+    }
+    charts = {
+        int(match.group(1))
+        for match in re.finditer(r"^&inote_([1-7])=", content, re.MULTILINE)
+    }
+    bpm_text = _maidata_field(content, "wholebpm", "0")
+    try:
+        bpm: float | str = float(bpm_text)
+    except ValueError:
+        bpm = bpm_text
+    return {
+        "id": song_dir.name,
+        "title": _maidata_field(content, "title", song_dir.name),
+        "artist": _maidata_field(content, "artist"),
+        "bpm": bpm,
+        "cover_url": _cover_url(song_dir, cover),
+        "difficulties": [
+            {
+                "id": difficulty,
+                "name": DIFFICULTY_NAMES.get(difficulty, str(difficulty)),
+                "level": levels.get(difficulty, ""),
+            }
+            for difficulty in sorted(charts)
+        ],
+    }
+
+
+class _SongCatalogIndex:
+    """Small persistent index for the metadata-only library endpoint."""
+
+    VERSION = 1
+
+    def __init__(self, root: Path):
+        self.root = root.resolve()
+        cache_key = hashlib.sha256(
+            os.path.normcase(str(self.root)).encode("utf-8"),
+        ).hexdigest()[:20]
+        self.cache_path = (
+            Path(tempfile.gettempdir())
+            / "maimai-rhythm-analysis"
+            / f"song-catalog-{cache_key}.json"
+        )
+        self._lock = threading.Lock()
+        self._songs: list[dict[str, Any]] | None = None
+        self._root_mtime_ns: int | None = None
+
+    def _root_signature(self) -> int:
+        return self.root.stat().st_mtime_ns
+
+    def _load_persistent(self, root_mtime_ns: int) -> list[dict[str, Any]] | None:
+        try:
+            data = json.loads(self.cache_path.read_text(encoding="utf-8"))
+        except (OSError, ValueError, TypeError):
+            return None
+        if (
+            not isinstance(data, dict)
+            or data.get("version") != self.VERSION
+            or data.get("root") != str(self.root)
+            or data.get("root_mtime_ns") != root_mtime_ns
+            or not isinstance(data.get("songs"), list)
+        ):
+            return None
+        return data["songs"]
+
+    def _save_persistent(
+        self,
+        songs: list[dict[str, Any]],
+        root_mtime_ns: int,
+    ) -> None:
+        try:
+            self.cache_path.parent.mkdir(parents=True, exist_ok=True)
+            _atomic_text(
+                self.cache_path,
+                json.dumps(
+                    {
+                        "version": self.VERSION,
+                        "root": str(self.root),
+                        "root_mtime_ns": root_mtime_ns,
+                        "songs": songs,
+                    },
+                    ensure_ascii=False,
+                    separators=(",", ":"),
+                ),
+                backup=False,
+            )
+        except OSError:
+            # The in-memory cache remains useful when the temp directory is
+            # read-only or temporarily locked by antivirus software.
+            pass
+
+    def _build(self) -> tuple[list[dict[str, Any]], int]:
+        # If the top-level directory changes during the scan, repeat once so a
+        # newly copied/removed song is not persisted as a complete snapshot.
+        songs: list[dict[str, Any]] = []
+        signature = self._root_signature()
+        for attempt in range(2):
+            songs = []
+            before = self._root_signature()
+            for directory in sorted(
+                self.root.iterdir(), key=lambda path: path.name.casefold(),
+            ):
+                if not directory.is_dir() or not (directory / "maidata.txt").is_file():
+                    continue
+                try:
+                    songs.append(_song_catalog_summary(directory))
+                except Exception as exc:
+                    songs.append({
+                        "id": directory.name,
+                        "title": directory.name,
+                        "error": str(exc),
+                        "difficulties": [],
+                    })
+            signature = self._root_signature()
+            if signature == before or attempt == 1:
+                break
+        return songs, signature
+
+    def get(self, *, refresh: bool = False) -> list[dict[str, Any]]:
+        root_mtime_ns = self._root_signature()
+        with self._lock:
+            if (
+                not refresh
+                and self._songs is not None
+                and self._root_mtime_ns == root_mtime_ns
+            ):
+                return self._songs
+            if not refresh:
+                persisted = self._load_persistent(root_mtime_ns)
+                if persisted is not None:
+                    self._songs = persisted
+                    self._root_mtime_ns = root_mtime_ns
+                    return persisted
+            songs, root_mtime_ns = self._build()
+            self._songs = songs
+            self._root_mtime_ns = root_mtime_ns
+            self._save_persistent(songs, root_mtime_ns)
+            return songs
+
+
+def _cover_thumbnail(song_dir: Path, cover: Path) -> Path:
+    """Create a browser-sized WebP once and reuse it until the cover changes."""
+    source_stat = cover.stat()
+    cache_key = hashlib.sha256(
+        (
+            f"{song_dir.resolve()}\0{cover.name.casefold()}\0"
+            f"{source_stat.st_mtime_ns}\0{source_stat.st_size}"
+        ).encode("utf-8"),
+    ).hexdigest()[:24]
+    cache_dir = Path(tempfile.gettempdir()) / "maimai-rhythm-analysis" / "covers"
+    target = cache_dir / f"{cache_key}.webp"
+    try:
+        if target.stat().st_size > 0:
+            return target
+    except OSError:
+        pass
+
+    from PIL import Image, ImageOps
+
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    handle, temporary_name = tempfile.mkstemp(
+        prefix=f".{cache_key}.", suffix=".tmp", dir=cache_dir,
+    )
+    os.close(handle)
+    temporary = Path(temporary_name)
+    try:
+        with Image.open(cover) as source:
+            image = ImageOps.exif_transpose(source)
+            image.thumbnail((640, 640), Image.Resampling.LANCZOS)
+            if image.mode != "RGB":
+                image = image.convert("RGB")
+            image.save(temporary, format="WEBP", quality=78, method=4)
+        _retry_file_operation(lambda: os.replace(temporary, target))
+    finally:
+        _cleanup_temp_file(temporary)
+    return target
 
 
 def create_app(
@@ -322,12 +518,27 @@ def create_app(
     config, warnings = load_config(config_file)
     root = Path(songs_root).resolve() if songs_root else resolve_songs_root(config)
     root.mkdir(parents=True, exist_ok=True)
-    app = FastAPI(title="Maimai Rhythm Analysis", version="1.0")
+    job_manager = JobManager(PROJECT_ROOT)
+    song_catalog = _SongCatalogIndex(root)
+
+    @asynccontextmanager
+    async def lifespan(_app: FastAPI):
+        try:
+            yield
+        finally:
+            job_manager.shutdown()
+
+    app = FastAPI(
+        title="Maimai Rhythm Analysis",
+        version="1.0",
+        lifespan=lifespan,
+    )
     app.state.config_file = Path(config_file).resolve() if config_file else None
     app.state.config = config
     app.state.config_warnings = warnings
     app.state.songs_root = root
-    app.state.jobs = JobManager(PROJECT_ROOT)
+    app.state.jobs = job_manager
+    app.state.song_catalog = song_catalog
     app.mount("/static", StaticFiles(directory=str(WEB_ROOT)), name="static")
 
     @app.get("/", response_class=HTMLResponse)
@@ -371,7 +582,12 @@ def create_app(
         }
 
     @app.get("/api/songs")
-    def songs():
+    def songs(
+        catalog: bool = Query(default=False),
+        refresh: bool = Query(default=False),
+    ):
+        if catalog:
+            return {"songs": song_catalog.get(refresh=refresh)}
         result = []
         for directory in sorted(root.iterdir(), key=lambda path: path.name.casefold()):
             if not directory.is_dir() or not (directory / "maidata.txt").is_file():
@@ -390,6 +606,21 @@ def create_app(
     @app.get("/api/songs/{song_id}")
     def song(song_id: str):
         return _song_info(_safe_song(root, song_id))
+
+    @app.get("/api/songs/{song_id}/cover")
+    def song_cover(song_id: str):
+        song_dir = _safe_song(root, song_id)
+        cover = _cover_path(song_dir)
+        if cover is None:
+            raise HTTPException(status_code=404, detail="歌曲没有封面")
+        headers = {"Cache-Control": "public, max-age=31536000, immutable"}
+        try:
+            thumbnail = _cover_thumbnail(song_dir, cover)
+        except (OSError, ValueError):
+            # A malformed/locked image must not break the whole library. The
+            # versioned URL also makes caching the original safe.
+            return FileResponse(cover, headers=headers)
+        return FileResponse(thumbnail, media_type="image/webp", headers=headers)
 
     @app.get("/api/songs/{song_id}/meter/{difficulty}")
     def get_meter(song_id: str, difficulty: int):

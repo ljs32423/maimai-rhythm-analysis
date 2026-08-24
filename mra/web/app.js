@@ -228,7 +228,7 @@ function renderSongError(message) {
     <p>歌曲库加载失败：${escapeHtml(message)}</p>
     <button id="retryLoadButton" class="secondary">重试</button>
   </div>`;
-  $("retryLoadButton").addEventListener("click", guard(loadSongs));
+  $("retryLoadButton").addEventListener("click", guard(() => loadSongs(true)));
 }
 
 function escapeHtml(value) {
@@ -237,10 +237,10 @@ function escapeHtml(value) {
   }[c]));
 }
 
-async function loadSongs() {
+async function loadSongs(refresh = false) {
   renderSongSkeletons();
   try {
-    const data = await api("/api/songs");
+    const data = await api(`/api/songs?catalog=true${refresh ? "&refresh=true" : ""}`);
     state.songs = data.songs;
     renderSongs();
   } catch (error) {
@@ -582,7 +582,7 @@ function bind() {
     event.preventDefault();
     card.click();
   });
-  $("refreshButton").addEventListener("click", guard(loadSongs));
+  $("refreshButton").addEventListener("click", guard(() => loadSongs(true)));
   $("settingsButton").addEventListener("click", () => $("settingsPanel").classList.toggle("hidden"));
   $("probeButton").addEventListener("click", () => guard(loadSystem)(true));
   $("saveSettingsButton").addEventListener("click", guard(saveSettings));

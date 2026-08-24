@@ -14,7 +14,8 @@ from mra.difficulty import (legacy_sweep_maidata_path,
 from mra.simai_parser import parse_maidata_content
 from mra.sweep_marks import (extract_sweep_difficulty,
                              sweep_maidata_semantically_equal)
-from mra.web_app import _atomic_text, _safe_song, create_app
+from mra.web_app import (_atomic_text, _safe_song, _song_catalog_summary,
+                         create_app)
 
 
 MAIDATA = """&title=Web Test
@@ -54,6 +55,38 @@ class WebAppTests(unittest.TestCase):
         self.assertEqual(song["title"], "Web Test")
         self.assertEqual(song["difficulties"][0]["id"], 5)
         self.assertFalse(song["difficulties"][0]["outputs"]["sweep"])
+
+    def test_catalog_reuses_index_until_explicit_refresh(self):
+        with mock.patch(
+            "mra.web_app._song_catalog_summary",
+            wraps=_song_catalog_summary,
+        ) as summarize:
+            first = self.client.get("/api/songs?catalog=true")
+            second = self.client.get("/api/songs?catalog=true")
+            refreshed = self.client.get("/api/songs?catalog=true&refresh=true")
+
+        self.assertEqual(first.status_code, 200)
+        self.assertEqual(second.json(), first.json())
+        self.assertEqual(refreshed.status_code, 200)
+        self.assertEqual(summarize.call_count, 2)
+        song = first.json()["songs"][0]
+        self.assertNotIn("outputs", song["difficulties"][0])
+
+    def test_catalog_cover_is_a_versioned_cached_thumbnail(self):
+        from PIL import Image
+
+        cover = self.song / "bg.png"
+        Image.new("RGB", (1200, 800), "#cc3366").save(cover)
+
+        catalog = self.client.get(
+            "/api/songs?catalog=true&refresh=true",
+        ).json()["songs"][0]
+        self.assertIn("?v=", catalog["cover_url"])
+
+        response = self.client.get(catalog["cover_url"])
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.headers["content-type"], "image/webp")
+        self.assertIn("immutable", response.headers["cache-control"])
 
     def test_generated_analysis_html_is_never_served_from_stale_cache(self):
         analysis = self.song / "outputs" / "MASTER" / "html" / "analysis.html"
