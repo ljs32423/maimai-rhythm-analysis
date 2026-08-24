@@ -571,6 +571,30 @@ class WorkflowTests(unittest.TestCase):
             self.assertEqual(output.read_text(encoding="utf-8"), original)
             extract.assert_not_called()
 
+    def test_forced_audio_alignment_atomically_overwrites_existing_offset(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "maidata.txt").write_text(MAIDATA_WITH_REMASTER, encoding="utf-8")
+            (root / "MASTER_preview.mp4").write_bytes(b"video")
+            (root / "track.mp3").write_bytes(b"track")
+            output = offset_file_path(root, 5)
+            output.parent.mkdir(parents=True)
+            output.write_text("1.2500\n", encoding="utf-8")
+
+            song = mock.Mock(first_offset=1.5, charts={5: mock.Mock()})
+            audio = np.zeros(4000 * 12, dtype=np.float32)
+            with mock.patch.object(align_audio, "parse_maidata", return_value=song), \
+                 mock.patch.object(align_audio, "compute_rhythm_events", return_value=[{"time": 2.0}]), \
+                 mock.patch.object(align_audio, "extract_audio_mono", side_effect=[(audio, 4000), (audio, 4000)]), \
+                 mock.patch.object(align_audio, "estimate_track_offset", return_value=(5.0, 0.95)):
+                offset = align_audio.align_song(
+                    str(root), "test", diff_id=5, force=True,
+                )
+
+            self.assertEqual(offset, 6.5)
+            self.assertEqual(output.read_text(encoding="utf-8"), "6.5000\n")
+            self.assertEqual(list(output.parent.glob(".offset.txt.*.tmp")), [])
+
     def test_required_release_tools_are_resolved_without_downloading(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp) / ".tools"
@@ -772,6 +796,7 @@ class WorkflowTests(unittest.TestCase):
             self.assertIn('class="virtual-strip"', html)
             self.assertIn('class="scrolling-stage"', html)
             self.assertIn('will-change: transform;', html)
+            self.assertNotIn('content-visibility: auto;', html)
             self.assertIn('.seek-wrap:hover input[type=range],', html)
             self.assertIn('.speed-wrap:hover input[type=range] {', html)
             self.assertIn(".seek-wrap.seeking input[type=range] {", html)
@@ -1091,26 +1116,26 @@ class WorkflowTests(unittest.TestCase):
                 active,
             )
 
-            # A decoder wait/recovery records diagnostics but never reanchors
-            # the running monotonic strip clock.
+            # Buffering pauses the compositor clock, and every recovery plus
+            # actually presented video frame reanchors it to the PV.
             waiting_handler = active.split(
                 "pvSvg.addEventListener('waiting', () => {", 1
             )[1].split('});', 1)[0]
-            self.assertNotIn('anchorClockSvg', waiting_handler)
+            self.assertIn('pauseForVideoBufferingSvg();', waiting_handler)
             playing_handler = active.split(
                 "pvSvg.addEventListener('playing', () => {", 1
             )[1].split('});', 1)[0]
-            self.assertIn(
-                'if (playingSvg && !clockActiveSvg)',
-                playing_handler,
-            )
+            self.assertIn('reanchorToVideoFrameSvg(pvSvg.currentTime, true);', playing_handler)
+            self.assertIn('scheduleVideoFrameSvg();', playing_handler)
+            self.assertIn('pvSvg.requestVideoFrameCallback(observeVideoFrameSvg)', active)
+            self.assertIn('Math.abs(animationTime - videoTime)', active)
             playback_clock = active.split(
                 'function playbackTimeSvg(', 1
             )[1].split('function renderStripSvg', 1)[0]
             self.assertNotIn('readyState < 2', playback_clock)
             self.assertIn(
                 "document.body.dataset.clockMode = "
-                "'monotonic-no-mid-playback-correction';",
+                "'presented-video-frame-reanchored';",
                 active,
             )
 
@@ -1622,6 +1647,19 @@ class WorkflowTests(unittest.TestCase):
              mock.patch.object(run_all, "run_step", side_effect=[True, False, True, True, True, True]):
             result = run_all.main()
         self.assertEqual(result, 1)
+
+    def test_run_all_does_not_publish_frontend_after_alignment_failure(self):
+        selected = [SongFolder(Path("song"), "song", "song")]
+        with mock.patch.object(sys, "argv", ["run_all.py"]), \
+             mock.patch.object(run_all, "discover_song_folders", return_value=selected), \
+             mock.patch.object(run_all, "target_difficulties_for_song", return_value=[5]), \
+             mock.patch.object(
+                 run_all, "run_step", side_effect=[True, True, True, False],
+             ) as run_step:
+            result = run_all.main()
+
+        self.assertEqual(result, 1)
+        self.assertEqual(len(run_step.call_args_list), 4)
 
     def test_run_all_only_passes_difficulty_to_supporting_steps(self):
         selected = [SongFolder(Path("Xaleid◆scopiX"), "Xaleid◆scopiX", "11820")]

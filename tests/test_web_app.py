@@ -55,6 +55,19 @@ class WebAppTests(unittest.TestCase):
         self.assertEqual(song["difficulties"][0]["id"], 5)
         self.assertFalse(song["difficulties"][0]["outputs"]["sweep"])
 
+    def test_generated_analysis_html_is_never_served_from_stale_cache(self):
+        analysis = self.song / "outputs" / "MASTER" / "html" / "analysis.html"
+        analysis.parent.mkdir(parents=True)
+        analysis.write_text("<html>fresh offset</html>", encoding="utf-8")
+
+        response = self.client.get(
+            "/library/Web%20Test/outputs/MASTER/html/analysis.html",
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.headers["cache-control"], "no-store")
+        self.assertIn("fresh offset", response.text)
+
     def test_meter_can_be_saved_and_reloaded(self):
         payload = {
             "data": {

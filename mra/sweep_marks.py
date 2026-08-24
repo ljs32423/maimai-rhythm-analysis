@@ -203,6 +203,11 @@ def _append_grid_directive(group: str, directive: str) -> str:
     )
 
 
+def _is_empty_timing_group(group: str) -> bool:
+    """Return whether a comma group contains only grid state and whitespace."""
+    return not _GRID_DIRECTIVE_RE.sub('', group).strip()
+
+
 def _is_boundary(value: float, boundaries: list[float]) -> bool:
     return any(abs(value - boundary) <= _REFLOW_EPSILON_BEATS
                for boundary in boundaries)
@@ -254,6 +259,16 @@ def _reflow_inote(inote: str, bpm: float, meter_map: MeterMap,
     expanded_meter = _expand_meter_map(meter_map, total_beats)
     boundaries = expanded_meter.boundaries(0.0, total_beats)
     states, grid_changes = _grid_states(groups)
+    meaningful_indexes = [
+        index for index, group in enumerate(groups[:-1])
+        if not _is_empty_timing_group(group)
+    ]
+    last_meaningful_index = meaningful_indexes[-1] if meaningful_indexes else -1
+    has_trailing_empty_padding = (
+        has_terminal_e
+        and last_meaningful_index >= 0
+        and last_meaningful_index < len(groups) - 2
+    )
     prefixes = [''] * len(groups)
     lines: list[str] = []
     current = ''
@@ -267,6 +282,13 @@ def _reflow_inote(inote: str, bpm: float, meter_map: MeterMap,
             if (boundary > start_beat + _REFLOW_EPSILON_BEATS
                 and boundary < end_beat - _REFLOW_EPSILON_BEATS)
         ]
+
+        # Do not manufacture free-second directives solely to draw a measure
+        # boundary in trailing silence.  There is no note or sweep marker left
+        # to place, and keeping the original grid is substantially clearer for
+        # manual editing (for example ``{1}1b/2,,E`` at the end of a chart).
+        if has_trailing_empty_padding and index >= last_meaningful_index:
+            internal = []
 
         if internal:
             beat_span = end_beat - start_beat

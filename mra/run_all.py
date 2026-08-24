@@ -19,7 +19,10 @@ maimai 节奏解析 一键生成
 
 每次完整处理都会强制重新计算音频延迟并覆盖对应的 offset.txt。
 """
-import os, sys, argparse, subprocess
+import argparse
+import os
+import subprocess
+import sys
 from datetime import datetime
 from .difficulty import DIFFICULTY_NAMES, default_target_difficulties
 from .simai_parser import parse_maidata
@@ -77,7 +80,6 @@ def main():
     ap.add_argument('-offset', '--offset', type=float, default=0.0, help='初始延迟 (秒)')
     args = ap.parse_args()
 
-    here = str(PROJECT_ROOT)
     base_dir = os.path.abspath(args.input) if args.input else str(PROJECT_ROOT)
     selected_songs = discover_song_folders(base_dir, args.dir)
     if not selected_songs:
@@ -110,6 +112,16 @@ def main():
                 step_ok = run_step(name, script, step_args, force)
                 diff_ok = diff_ok and step_ok
                 ok_all = ok_all and step_ok
+                # 后两个产物会把 offset 固化到 HTML/manifest 中。本次
+                # 重新对齐失败时不能继续沿用旧文件，否则会生成一份
+                # 看似成功、实际延迟过期的前端。
+                if script == 'mra.align_audio' and not step_ok:
+                    print(
+                        f'[{timestamp_now()}] {song.path.name} '
+                        f'{DIFFICULTY_NAMES.get(difficulty, difficulty)} '
+                        '音频对齐失败，已停止生成前端产物',
+                    )
+                    break
             if diff_ok:
                 print(f'[{timestamp_now()}] {song.path.name} {DIFFICULTY_NAMES.get(difficulty, difficulty)} 完成')
     return 0 if ok_all else 1

@@ -584,7 +584,12 @@ def create_app(
 
     @app.get("/library/{relative:path}")
     def library(relative: str):
-        return FileResponse(_safe_library_file(root, relative))
+        path = _safe_library_file(root, relative)
+        # analysis.html 内联了本次自动对齐的 offset。禁止复用旧页面，
+        # 否则重新处理后新文件已落盘，新打开的前端仍可能带着旧延迟。
+        headers = ({"Cache-Control": "no-store"}
+                   if path.suffix.casefold() == ".html" else None)
+        return FileResponse(path, headers=headers)
 
     @app.exception_handler(ConfigError)
     async def config_error_handler(_request, exc: ConfigError):

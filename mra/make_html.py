@@ -12,8 +12,13 @@ maimai 节奏解析网页生成器
   python make_html.py -d "WiPE OUT MEMORIES"   # 单曲
   python make_html.py -diff 4 -f               # 指定难度+强制
 """
-import os, sys, argparse, html, json, re
+import argparse
+import html
+import json
 import math
+import os
+import re
+import sys
 from pathlib import Path
 from urllib.parse import quote
 
@@ -36,7 +41,7 @@ from .sweep_marks import apply_sweep_maidata
 # Arcaea 常量 (与 4.py 完全一致)
 # 降低滚动条整体缩放，等价于降低屏幕上“每拍经过的像素数”，从而减慢观感滚动速度。
 SVG_SCALE = 1.8
-PLAYER_RENDERER_VERSION = 10
+PLAYER_RENDERER_VERSION = 12
 
 
 ANALYSIS_SERVER_SCRIPT = r'''#!/usr/bin/env python3
@@ -231,19 +236,26 @@ def generate_html(song_dir, song_id, diff_id=5, offset=0.0):
             with open(offset_file, 'r') as f:
                 auto_offset = float(f.read().strip())
             print(f'  [{song_id}] 自动对齐 offset={auto_offset:+.3f}s')
-        except:
+        except (OSError, ValueError):
             pass
     if offset != 0.0:
         auto_offset = offset
 
     if not os.path.exists(maidata):
-        print(f'  [{song_id}] 无 maidata.txt'); return
+        print(f'  [{song_id}] 无 maidata.txt')
+        return
     if not os.path.exists(svg_path):
-        print(f'  [{song_id}] 无 {svg_path.relative_to(song_root) if svg_path.is_relative_to(song_root) else svg_path}, 请先运行 visualize.py -f'); return
+        print(
+            f'  [{song_id}] 无 '
+            f'{svg_path.relative_to(song_root) if svg_path.is_relative_to(song_root) else svg_path}, '
+            '请先运行 visualize.py -f',
+        )
+        return
 
     song = parse_maidata(maidata)
     if diff_id not in song.charts:
-        print(f'  [{song_id}] 无难度 {diff_name}'); return
+        print(f'  [{song_id}] 无难度 {diff_name}')
+        return
     sweep_path, sweep_created = ensure_sweep_maidata_for_song(
         song_root, song, diff_id,
     )
@@ -604,9 +616,9 @@ body {{
     user-select: none;
     image-rendering: auto;
     contain: strict;
-    /* 整条滚动条可达数万像素宽。让远离视口的分段跳过渲染，把光栅与
-       GPU 纹理压力限制在视口附近，避免播放途中出现分块光栅卡顿。 */
-    content-visibility: auto;
+    /* 分段通过父层 transform 从数万像素外平移进视口。Chromium 的
+       content-visibility:auto 偶尔会继续把已经移入视口的分段当成离屏
+       内容，导致节奏条只有播放标记而没有音符；这里必须保持正常绘制。 */
 }}
 .left-pentagon {{
     position: absolute; top: 0; width: var(--pentagon-width); height: var(--rhythm-height);
@@ -1644,6 +1656,7 @@ const SEGMENTS_SVG = {json.dumps(segments_js, ensure_ascii=False)};
 const VIDEO_SOURCES_SVG = {json.dumps(video_sources_js, ensure_ascii=False)};
 const HAS_SEGMENTS_SVG = SEGMENTS_SVG.length > 0;
 const STATUS_INTERVAL_SVG_MS = 100;
+const VIDEO_FRAME_SYNC_TOLERANCE_SVG = 0.035;
 
 const virtualStripSvg = document.getElementById('virtualStrip');
 const fullStripSvg = document.getElementById('svgScroll');
@@ -1695,12 +1708,15 @@ let lastFrameAtSvg = null;
 let maxFrameGapSvg = 0;
 let lastStatsPublishAtSvg = 0;
 let videoStallCountSvg = 0;
+let presentedVideoTimeSvg = null;
+let videoFrameCallbackSvg = null;
+let videoBufferingSvg = false;
 
 if (window.location.protocol === 'file:') {{
     localFileWarningSvg.hidden = false;
 }}
 document.body.dataset.rendererMode = 'segmented-svg';
-document.body.dataset.clockMode = 'monotonic-no-mid-playback-correction';
+document.body.dataset.clockMode = 'presented-video-frame-reanchored';
 document.body.dataset.scrollDriver = 'initializing';
 document.body.dataset.videoPreloadState = videoPreloadStateSvg;
 document.body.dataset.svgSegmentCount = String(SEGMENTS_SVG.length);
@@ -1909,6 +1925,59 @@ function syncStripAnimationSvg(videoTime) {{
         0,
         Math.min(duration, videoTime)
     ) * 1000;
+}}
+
+function reanchorToVideoFrameSvg(videoTime, force = false) {{
+    if (!Number.isFinite(videoTime)) return;
+    presentedVideoTimeSvg = videoTime;
+    anchorClockSvg(videoTime, playingSvg && !videoBufferingSvg);
+    if (!compositorScrollSvg || stripAnimationSvg === null) return;
+    const animationTime = Number(stripAnimationSvg.currentTime) / 1000;
+    if (
+        force
+        || !Number.isFinite(animationTime)
+        || Math.abs(animationTime - videoTime) > VIDEO_FRAME_SYNC_TOLERANCE_SVG
+    ) {{
+        syncStripAnimationSvg(videoTime);
+    }}
+}}
+
+function observeVideoFrameSvg(_timestamp, metadata) {{
+    videoFrameCallbackSvg = null;
+    if (!playingSvg) return;
+    const videoTime = Number.isFinite(metadata.mediaTime)
+        ? metadata.mediaTime
+        : pvSvg.currentTime;
+    reanchorToVideoFrameSvg(videoTime);
+    scheduleVideoFrameSvg();
+}}
+
+function scheduleVideoFrameSvg() {{
+    if (
+        !playingSvg
+        || videoFrameCallbackSvg !== null
+        || typeof pvSvg.requestVideoFrameCallback !== 'function'
+    ) return;
+    videoFrameCallbackSvg = pvSvg.requestVideoFrameCallback(observeVideoFrameSvg);
+}}
+
+function stopVideoFramesSvg() {{
+    if (
+        videoFrameCallbackSvg !== null
+        && typeof pvSvg.cancelVideoFrameCallback === 'function'
+    ) {{
+        pvSvg.cancelVideoFrameCallback(videoFrameCallbackSvg);
+    }}
+    videoFrameCallbackSvg = null;
+}}
+
+function pauseForVideoBufferingSvg() {{
+    videoBufferingSvg = true;
+    const mediaTime = Number.isFinite(pvSvg.currentTime)
+        ? pvSvg.currentTime
+        : (presentedVideoTimeSvg ?? 0);
+    anchorClockSvg(mediaTime, false);
+    pauseStripAnimationSvg(mediaTime);
 }}
 
 function startStripAnimationSvg(videoTime) {{
@@ -2179,6 +2248,7 @@ function playSvg() {{
     btnPlaySvg.title = '暂停';
     btnPlaySvg.setAttribute('aria-label', '暂停');
     pvSvg.muted = false;
+    videoBufferingSvg = false;
     anchorClockSvg(pvSvg.currentTime, false);
     startFramesSvg();
     pvSvg.play().catch((error) => {{
@@ -2195,6 +2265,8 @@ function pauseSvg() {{
     btnPlaySvg.setAttribute('aria-label', '播放');
     pvSvg.pause();
     stopFramesSvg();
+    stopVideoFramesSvg();
+    videoBufferingSvg = false;
     pauseStripAnimationSvg(pausedTime);
     anchorClockSvg(pausedTime, false);
     renderAllSvg(true);
@@ -2332,31 +2404,36 @@ pvSvg.addEventListener('loadedmetadata', () => {{
     renderAllSvg(true);
 }});
 pvSvg.addEventListener('playing', () => {{
-    // Initial play/resume establishes the clock once. A decoder recovery emits
-    // `playing` too, but must never pull the already-running SVG clock.
-    if (playingSvg && !clockActiveSvg) {{
-        anchorClockSvg(pvSvg.currentTime, true);
-        startStripAnimationSvg(pvSvg.currentTime);
-    }}
-    if (playingSvg) startFramesSvg();
+    if (!playingSvg) return;
+    // `playing` 也会在解码卡顿恢复时触发。每次都以 PV 重新锚定，
+    // 再由首个实际呈现帧修正解码时钟与可见画面的差值。
+    videoBufferingSvg = false;
+    reanchorToVideoFrameSvg(pvSvg.currentTime, true);
+    startStripAnimationSvg(pvSvg.currentTime);
+    scheduleVideoFrameSvg();
+    startFramesSvg();
 }});
 pvSvg.addEventListener('waiting', () => {{
-    // PV data is streamed on demand. A network/decoder wait must not stop the
-    // independent compositor animation that drives the rhythm strip.
     videoStallCountSvg += 1;
     document.body.dataset.videoStallCount = String(videoStallCountSvg);
+    pauseForVideoBufferingSvg();
 }});
 pvSvg.addEventListener('stalled', () => {{
     videoStallCountSvg += 1;
     document.body.dataset.videoStallCount = String(videoStallCountSvg);
+    pauseForVideoBufferingSvg();
 }});
 pvSvg.addEventListener('seeking', () => {{
+    stopVideoFramesSvg();
     anchorClockSvg(pvSvg.currentTime, false);
     pauseStripAnimationSvg(pvSvg.currentTime);
 }});
 pvSvg.addEventListener('seeked', () => {{
     anchorClockSvg();
-    if (playingSvg) startStripAnimationSvg(pvSvg.currentTime);
+    if (playingSvg) {{
+        startStripAnimationSvg(pvSvg.currentTime);
+        scheduleVideoFrameSvg();
+    }}
     renderAllSvg(true);
 }});
 pvSvg.addEventListener('ended', pauseSvg);
@@ -2388,7 +2465,7 @@ window.__RHYTHM_ANALYSIS__ = {{
         videoPreloadState: videoPreloadStateSvg,
         videoStreaming: pvReadySvg && !pvSvg.currentSrc.startsWith('blob:'),
         videoStallCount: videoStallCountSvg,
-        clockMode: 'monotonic-no-mid-playback-correction',
+        clockMode: 'presented-video-frame-reanchored',
         scrollDriver: compositorScrollSvg
             ? 'web-animations-compositor'
             : 'request-animation-frame',
@@ -2458,11 +2535,13 @@ def main():
 
     base_dir = os.path.abspath(args.input) if args.input else str(PROJECT_ROOT)
     if not os.path.isdir(base_dir):
-        print(f'错误: {base_dir} 不存在'); sys.exit(1)
+        print(f'错误: {base_dir} 不存在')
+        sys.exit(1)
 
     songs = find_song_dirs(base_dir, args.dir)
     if not songs:
-        print(f'在 {base_dir} 下未找到含 maidata.txt 的目录'); return
+        print(f'在 {base_dir} 下未找到含 maidata.txt 的目录')
+        return
 
     difficulty_label = (DIFFICULTY_NAMES.get(args.difficulty, args.difficulty)
                         if args.difficulty is not None else '默认 MASTER/Re:MASTER')

@@ -72,6 +72,20 @@ class SweepMarksTests(unittest.TestCase):
             reflowed,
         )
 
+    def test_reflow_does_not_split_trailing_silence_into_free_seconds(self):
+        content = """&title=Trailing Silence
+&wholebpm=225
+&lv_5=13
+&inote_5=(225){1}1,,E
+"""
+        meter = self.meter('3/4', (0, '3/4'))
+
+        reflowed = reflow_sweep_maidata(content, 225, {5: meter})
+
+        self.assertNotIn('{#', reflowed)
+        self.assertIn('{1}1,,\nE', reflowed)
+        self.assertTrue(sweep_maidata_semantically_equal(content, reflowed))
+
     def test_reflow_uses_each_difficultys_meter_and_truncates_at_changes(self):
         content = """&title=Multi Meter
 &wholebpm=120

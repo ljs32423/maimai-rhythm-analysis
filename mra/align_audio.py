@@ -9,7 +9,13 @@
   python align_audio.py -d "WiPE OUT MEMORIES"         # 自动对齐 MASTER
   python align_audio.py -d "WiPE OUT MEMORIES" -diff 4 # 指定难度
 """
-import os, sys, argparse, subprocess, tempfile, wave
+import argparse
+import math
+import os
+import subprocess
+import sys
+import tempfile
+import wave
 import numpy as np
 from scipy import signal
 from scipy.ndimage import uniform_filter1d
@@ -21,6 +27,28 @@ from .difficulty import (DIFFICULTY_NAMES, default_target_difficulties,
 from .song_library import PROJECT_ROOT, find_song_dirs
 
 ALIGN_SAMPLE_RATE = 22050  # 提高采样率减少量化误差 (原 16000)
+
+
+def write_offset_file(path, offset):
+    """原子写入对齐结果，避免前端读到半写入或空文件。"""
+    value = float(offset)
+    if not math.isfinite(value):
+        raise ValueError(f'无效的音频偏移: {offset!r}')
+    output = os.fspath(path)
+    directory = os.path.dirname(output) or '.'
+    os.makedirs(directory, exist_ok=True)
+    handle, temporary = tempfile.mkstemp(
+        prefix=f'.{os.path.basename(output)}.', suffix='.tmp', dir=directory,
+    )
+    try:
+        with os.fdopen(handle, 'w', encoding='utf-8', newline='\n') as stream:
+            stream.write(f'{value:.4f}\n')
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(temporary, output)
+    finally:
+        if os.path.exists(temporary):
+            os.remove(temporary)
 
 
 def extract_audio_mono(path, sr=22050, duration=None):
@@ -167,18 +195,22 @@ def align_song(song_dir, song_id, diff_id=5, force=False):
             return existing_offset
 
     if not video_path:
-        print(f'  [{song_id}] 无 {preview_video_candidates(diff_id)[0]}'); return None
+        print(f'  [{song_id}] 无 {preview_video_candidates(diff_id)[0]}')
+        return None
     if not os.path.exists(maidata):
-        print(f'  [{song_id}] 无 maidata.txt'); return None
+        print(f'  [{song_id}] 无 maidata.txt')
+        return None
 
     # 谱面首个音符时间 (相对谱面开始)
     song = parse_maidata(maidata)
     if diff_id not in song.charts:
-        print(f'  [{song_id}] 无难度 {diff_name}'); return None
+        print(f'  [{song_id}] 无难度 {diff_name}')
+        return None
     ch = song.charts[diff_id]
     ev = compute_rhythm_events(ch)
     if not ev:
-        print(f'  [{song_id}] 无音符'); return None
+        print(f'  [{song_id}] 无音符')
+        return None
     first_note_time = ev[0]['time']  # 相对谱面开始
     first_offset = song.first_offset
     # 谱面首音符的绝对时间 (相对音源开头)
@@ -188,7 +220,8 @@ def align_song(song_dir, song_id, diff_id=5, force=False):
     print(f'  [{song_id}] 提取预览音轨...', end=' ', flush=True)
     v_audio, sr = extract_audio_mono(video_path, sr=ALIGN_SAMPLE_RATE)
     if v_audio is None:
-        print('失败'); return None
+        print('失败')
+        return None
     print(f'✓ {len(v_audio)/sr:.1f}s')
 
     offset = None
@@ -211,7 +244,8 @@ def align_song(song_dir, song_id, diff_id=5, force=False):
     if offset is None:
         first_tap = detect_first_onset(v_audio, sr, min_duration=0.2)  # 更短的持续判定 (原 0.3s)
         if first_tap is None:
-            print(f'  [{song_id}] 未检测到可用对齐点'); return None
+            print(f'  [{song_id}] 未检测到可用对齐点')
+            return None
         offset = first_tap - first_note_time
         print(f'  [{song_id}] 首音回退: {first_tap:.3f}s, 谱面首音符: {first_note_abs:.3f}s')
 
@@ -221,8 +255,7 @@ def align_song(song_dir, song_id, diff_id=5, force=False):
     print(f'  [{song_id}] 滚动条首音经过圆圈: {first_note_scroll_time:.4f}s')
     print(f'  [{song_id}] VIDEO_OFFSET = {offset:+.3f}s')
 
-    with open(offset_file, 'w', encoding='utf-8') as f:
-        f.write(f'{offset:.4f}\n')
+    write_offset_file(offset_file, offset)
     print(f'  [{song_id}] 已保存 {offset_file.relative_to(song_dir)}')
     return offset
 
@@ -239,11 +272,13 @@ def main():
 
     base_dir = os.path.abspath(args.input) if args.input else str(PROJECT_ROOT)
     if not os.path.isdir(base_dir):
-        print(f'错误: {base_dir} 不存在'); sys.exit(1)
+        print(f'错误: {base_dir} 不存在')
+        sys.exit(1)
 
     songs = find_song_dirs(base_dir, args.dir)
     if not songs:
-        print(f'在 {base_dir} 下未找到含 maidata.txt 的目录'); return
+        print(f'在 {base_dir} 下未找到含 maidata.txt 的目录')
+        return
 
     difficulty_label = (DIFFICULTY_NAMES.get(args.difficulty, args.difficulty)
                         if args.difficulty is not None else '默认 MASTER/Re:MASTER')
