@@ -75,11 +75,6 @@ def sweep_maidata_path(song_dir: str | Path, difficulty_id: int) -> Path:
     )
 
 
-def legacy_sweep_maidata_path(song_dir: str | Path) -> Path:
-    """返回旧版歌曲级扫键谱面路径，仅用于无损迁移。"""
-    return Path(song_dir) / "maidata_sweep.txt"
-
-
 def rhythm_svg_path(song_dir: str | Path, difficulty_id: int) -> Path:
     return difficulty_output_path(song_dir, difficulty_id, "rhythm", "rhythm.svg")
 

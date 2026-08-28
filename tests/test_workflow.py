@@ -15,7 +15,8 @@ import mra.render_strip_video as render_strip_video
 import mra.run_all as run_all
 import mra.visualize as visualize
 from mra.difficulty import (analysis_html_path, difficulty_file_stem, difficulty_name,
-                            find_preview_video, offset_file_path, preview_video_path,
+                            find_preview_video, meter_file_path, offset_file_path,
+                            preview_video_path,
                             preview_video_candidates, rhythm_png_path, rhythm_svg_path,
                             strip_svg_path, sweep_maidata_path)
 from mra.meter import MeterMap
@@ -249,6 +250,35 @@ class WorkflowTests(unittest.TestCase):
             tempdir.assert_called_once_with(prefix="mra-majdata-record-")
             close_window.assert_called_once_with(work)
             self.assertTrue(output.exists())
+
+    def test_final_preview_reencodes_audio_for_browser_compatibility(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            source = root / "raw.mp4"
+            output = root / "preview.mp4"
+            source.write_bytes(b"raw")
+            commands = []
+
+            def run_with_fallback(factory, **_kwargs):
+                command = factory("h264_nvenc")
+                commands.append(command)
+                Path(command[-1]).write_bytes(b"preview")
+                return mock.Mock(returncode=0), "h264_nvenc"
+
+            with mock.patch.object(
+                render_preview,
+                "run_with_fallback",
+                side_effect=run_with_fallback,
+            ):
+                render_preview.crop_recorded_preview("ffmpeg", source, output)
+
+            command = commands[0]
+            self.assertNotIn("copy", command[command.index("-c:a"):])
+            self.assertEqual(command[command.index("-c:a") + 1], "aac")
+            self.assertEqual(
+                command[command.index("-b:a") + 1],
+                render_preview.PREVIEW_AUDIO_BITRATE,
+            )
 
     def test_key_sounds_are_enabled_and_follow_majdata_note_types(self):
         self.assertTrue(render_preview.ENABLE_KEY_SOUNDS)
@@ -751,6 +781,48 @@ class WorkflowTests(unittest.TestCase):
             self.assertTrue(rhythm_png_path(root, 6).exists())
             self.assertTrue((root / "outputs" / "ReMASTER" / "strip" / "segments" / "strip_seg_000.svg").exists())
 
+    def test_visualize_rebuilds_existing_outputs_when_meter_is_newer(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "maidata.txt").write_text(
+                MAIDATA_WITH_REMASTER, encoding="utf-8",
+            )
+            meter = meter_file_path(root, 6)
+            meter.parent.mkdir(parents=True)
+            meter.write_text(json.dumps({
+                "default": "3/4",
+                "sections": [{"start_beat": 0, "signature": "3/4"}],
+            }), encoding="utf-8")
+
+            outputs = [
+                rhythm_svg_path(root, 6),
+                strip_svg_path(root, 6),
+                rhythm_png_path(root, 6),
+            ]
+            for output in outputs:
+                output.parent.mkdir(parents=True, exist_ok=True)
+                output.write_text("old", encoding="utf-8")
+            segment_dir = root / "outputs" / "ReMASTER" / "strip" / "segments"
+            segment_dir.mkdir(parents=True)
+            for index in range(20):
+                output = segment_dir / f"strip_seg_{index:03d}.svg"
+                output.write_text("old", encoding="utf-8")
+                outputs.append(output)
+            for output in outputs:
+                os.utime(output, ns=(1_000_000_000, 1_000_000_000))
+            os.utime(meter, ns=(2_000_000_000, 2_000_000_000))
+
+            with mock.patch.object(visualize, "render_strip_svg") as svg_render, \
+                 mock.patch.object(visualize, "render_strip_png") as png_render, \
+                 mock.patch.object(
+                     visualize, "render_strip_svg_segments",
+                 ) as segment_render:
+                visualize.process_song(str(root), "test", force=False)
+
+            self.assertEqual(svg_render.call_count, 2)
+            png_render.assert_called_once()
+            segment_render.assert_called_once()
+
     def test_html_uses_safe_remaster_paths(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -1036,6 +1108,25 @@ class WorkflowTests(unittest.TestCase):
 
             self.assertTrue(make_html.output_needs_regeneration(str(root), 5, str(html_path)))
 
+    def test_html_regenerates_when_meter_is_newer_than_output(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            html_path = analysis_html_path(root, 5)
+            html_path.parent.mkdir(parents=True)
+            html_path.write_text(
+                f'<body data-renderer-version="{make_html.PLAYER_RENDERER_VERSION}">',
+                encoding="utf-8",
+            )
+            meter = meter_file_path(root, 5)
+            meter.parent.mkdir(parents=True)
+            meter.write_text('{}', encoding="utf-8")
+            os.utime(html_path, ns=(1_000_000_000, 1_000_000_000))
+            os.utime(meter, ns=(2_000_000_000, 2_000_000_000))
+
+            self.assertTrue(make_html.output_needs_regeneration(
+                root, 5, html_path,
+            ))
+
     def test_html_skips_when_output_is_newer_than_offset(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -1129,6 +1220,18 @@ class WorkflowTests(unittest.TestCase):
             self.assertIn('scheduleVideoFrameSvg();', playing_handler)
             self.assertIn('pvSvg.requestVideoFrameCallback(observeVideoFrameSvg)', active)
             self.assertIn('Math.abs(animationTime - videoTime)', active)
+            self.assertIn('const VIDEO_FRAME_STALL_TIMEOUT_SVG_MS = 350;', active)
+            self.assertIn('lastPresentedFrameAtSvg = timestamp;', active)
+            self.assertIn('timestamp - lastPresentedFrameAtSvg', active)
+            self.assertIn(
+                "pvSvg.addEventListener('pause', () => {",
+                active,
+            )
+            buffering_clock = active.split(
+                'function playbackTimeSvg(', 1
+            )[1].split('function scrollDistanceSvg', 1)[0]
+            self.assertIn('if (videoBufferingSvg)', buffering_clock)
+            self.assertIn('presentedVideoTimeSvg', buffering_clock)
             playback_clock = active.split(
                 'function playbackTimeSvg(', 1
             )[1].split('function renderStripSvg', 1)[0]

@@ -33,6 +33,7 @@ from .simai_parser import (parse_maidata, NoteType, Note, Chart, SongData,
                            time_to_beat)
 from .difficulty import (DIFFICULTY_NAMES, default_target_difficulties,
                          difficulty_file_stem, legacy_difficulty_path,
+                         meter_file_path,
                          rhythm_png_path, rhythm_svg_path, strip_segment_base_path,
                          strip_svg_path)
 from .meter import MeterMap, ensure_meter_file
@@ -1410,6 +1411,24 @@ def render_compact_strip_png(events, total_beats, bpm, chart, out_path,
 
 # ============ 发现歌曲 & 处理 ============
 
+def visual_output_needs_regeneration(output: str | Path,
+                                     dependencies=(), force=False) -> bool:
+    """已有可视化产物在输入文件更新后也必须重建。"""
+    if force:
+        return True
+    output_path = Path(output)
+    if not output_path.is_file():
+        return True
+    try:
+        output_mtime = output_path.stat().st_mtime_ns
+        return any(
+            Path(dependency).is_file()
+            and Path(dependency).stat().st_mtime_ns > output_mtime
+            for dependency in dependencies
+        )
+    except OSError:
+        return True
+
 def process_song(song_dir, song_id, force=False, difficulties=None):
     """
     处理单首歌曲: 读取 maidata.txt → 解析谱面 → 输出 SVG/PNG。
@@ -1446,7 +1465,13 @@ def process_song(song_dir, song_id, force=False, difficulties=None):
             print(f'  [{song_id}] 扫键标记警告: {warning}')
         # 先读取或初始化拍号文件，让所有输出共用同一份人工小节时间轴。
         last_note_beat = time_to_beat(max(n.time_sec for n in ch.notes), ch.bpm_timeline)
+        meter_path = meter_file_path(song_dir, did)
+        meter_existed = meter_path.is_file()
         meter_map = ensure_meter_file(song_dir, did, last_note_beat)
+        # 首次为旧产物补默认 4/4 模板时，旧图本来就是 4/4，
+        # 不因新建文件的 mtime 做一次无意义重绘。已有 meter.json
+        # 则是真正的人工输入，它比产物新时必须重建。
+        visual_dependencies = (meter_path,) if meter_existed else ()
         folded_total_beats = meter_map.add_measures(last_note_beat, 1)
         long_total_beats = meter_map.add_measures(
             folded_total_beats, LONG_IMAGE_EXTRA_MEASURES,
@@ -1460,7 +1485,9 @@ def process_song(song_dir, song_id, force=False, difficulties=None):
         # 1) 完整长条 SVG (不折叠, 含标题+标注)
         rhythm_svg = rhythm_svg_path(song_dir, did)
         rhythm_svg.parent.mkdir(parents=True, exist_ok=True)
-        if force or not os.path.exists(rhythm_svg):
+        if visual_output_needs_regeneration(
+            rhythm_svg, visual_dependencies, force,
+        ):
             try:
                 render_strip_svg(events, long_total_beats, song.bpm, ch,
                                  str(rhythm_svg), title, meter_map=meter_map)
@@ -1470,7 +1497,9 @@ def process_song(song_dir, song_id, force=False, difficulties=None):
         # 2) 紧凑 SVG (仅音符+标注区, 无标题/行间距, 用于 make_html.py 嵌入)
         strip_svg = strip_svg_path(song_dir, did)
         strip_svg.parent.mkdir(parents=True, exist_ok=True)
-        if force or not os.path.exists(strip_svg):
+        if visual_output_needs_regeneration(
+            strip_svg, visual_dependencies, force,
+        ):
             try:
                 render_strip_svg(events, long_total_beats, song.bpm, ch,
                                  str(strip_svg), title, compact=True, meter_map=meter_map)
@@ -1480,7 +1509,12 @@ def process_song(song_dir, song_id, force=False, difficulties=None):
         # 2.5) 紧凑 SVG 分段 (前端优先虚拟化加载；完整 strip 作为 fallback)
         segment_base.parent.mkdir(parents=True, exist_ok=True)
         expected_segments = strip_segment_paths(str(segment_base), long_total_beats)
-        if force or any(not os.path.exists(path) for path in expected_segments):
+        if any(
+            visual_output_needs_regeneration(
+                path, visual_dependencies, force,
+            )
+            for path in expected_segments
+        ):
             try:
                 render_strip_svg_segments(events, long_total_beats, song.bpm, ch,
                                           str(segment_base), meter_map=meter_map)
@@ -1490,7 +1524,9 @@ def process_song(song_dir, song_id, force=False, difficulties=None):
         # 3) 折叠 PNG (每32拍一行, 方便直接查看)
         rhythm_png = rhythm_png_path(song_dir, did)
         rhythm_png.parent.mkdir(parents=True, exist_ok=True)
-        if force or not os.path.exists(rhythm_png):
+        if visual_output_needs_regeneration(
+            rhythm_png, visual_dependencies, force,
+        ):
             try:
                 render_strip_png(events, folded_total_beats, song.bpm, ch,
                                  str(rhythm_png), title, meter_map=meter_map)

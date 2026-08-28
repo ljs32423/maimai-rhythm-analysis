@@ -33,6 +33,7 @@ from .visualize import (compute_rhythm_events, PX_PER_BEAT, PAD_X,
 from .difficulty import (DIFFICULTY_NAMES, analysis_html_path, default_target_difficulties,
                          difficulty_file_stem, find_preview_video,
                          legacy_difficulty_path,
+                         meter_file_path,
                          offset_file_path, preview_video_candidates,
                          strip_segment_base_path, strip_svg_path)
 from .song_library import PROJECT_ROOT, find_song_dirs
@@ -41,7 +42,7 @@ from .sweep_marks import apply_sweep_maidata
 # Arcaea 常量 (与 4.py 完全一致)
 # 降低滚动条整体缩放，等价于降低屏幕上“每拍经过的像素数”，从而减慢观感滚动速度。
 SVG_SCALE = 1.8
-PLAYER_RENDERER_VERSION = 12
+PLAYER_RENDERER_VERSION = 13
 
 
 ANALYSIS_SERVER_SCRIPT = r'''#!/usr/bin/env python3
@@ -1657,6 +1658,7 @@ const VIDEO_SOURCES_SVG = {json.dumps(video_sources_js, ensure_ascii=False)};
 const HAS_SEGMENTS_SVG = SEGMENTS_SVG.length > 0;
 const STATUS_INTERVAL_SVG_MS = 100;
 const VIDEO_FRAME_SYNC_TOLERANCE_SVG = 0.035;
+const VIDEO_FRAME_STALL_TIMEOUT_SVG_MS = 350;
 
 const virtualStripSvg = document.getElementById('virtualStrip');
 const fullStripSvg = document.getElementById('svgScroll');
@@ -1709,6 +1711,7 @@ let maxFrameGapSvg = 0;
 let lastStatsPublishAtSvg = 0;
 let videoStallCountSvg = 0;
 let presentedVideoTimeSvg = null;
+let lastPresentedFrameAtSvg = null;
 let videoFrameCallbackSvg = null;
 let videoBufferingSvg = false;
 
@@ -1817,6 +1820,11 @@ function playbackTimeSvg(timestamp = performance.now()) {{
     const actual = pvReadySvg && Number.isFinite(pvSvg.currentTime)
         ? pvSvg.currentTime
         : 0;
+    if (videoBufferingSvg) {{
+        return Number.isFinite(presentedVideoTimeSvg)
+            ? presentedVideoTimeSvg
+            : actual;
+    }}
     if (
         !clockActiveSvg
         || !playingSvg
@@ -1942,13 +1950,17 @@ function reanchorToVideoFrameSvg(videoTime, force = false) {{
     }}
 }}
 
-function observeVideoFrameSvg(_timestamp, metadata) {{
+function observeVideoFrameSvg(timestamp, metadata) {{
     videoFrameCallbackSvg = null;
     if (!playingSvg) return;
+    const recovering = videoBufferingSvg;
+    videoBufferingSvg = false;
+    lastPresentedFrameAtSvg = timestamp;
     const videoTime = Number.isFinite(metadata.mediaTime)
         ? metadata.mediaTime
         : pvSvg.currentTime;
-    reanchorToVideoFrameSvg(videoTime);
+    reanchorToVideoFrameSvg(videoTime, recovering);
+    if (recovering) startStripAnimationSvg(videoTime);
     scheduleVideoFrameSvg();
 }}
 
@@ -1973,9 +1985,9 @@ function stopVideoFramesSvg() {{
 
 function pauseForVideoBufferingSvg() {{
     videoBufferingSvg = true;
-    const mediaTime = Number.isFinite(pvSvg.currentTime)
-        ? pvSvg.currentTime
-        : (presentedVideoTimeSvg ?? 0);
+    const mediaTime = Number.isFinite(presentedVideoTimeSvg)
+        ? presentedVideoTimeSvg
+        : (Number.isFinite(pvSvg.currentTime) ? pvSvg.currentTime : 0);
     anchorClockSvg(mediaTime, false);
     pauseStripAnimationSvg(mediaTime);
 }}
@@ -2085,6 +2097,19 @@ function renderAllSvg(force = false) {{
 function frameSvg(timestamp) {{
     rafSvg = null;
     if (!playingSvg) return;
+    if (pvSvg.paused) {{
+        pauseSvg();
+        return;
+    }}
+    if (
+        !videoBufferingSvg
+        && typeof pvSvg.requestVideoFrameCallback === 'function'
+        && lastPresentedFrameAtSvg !== null
+        && timestamp - lastPresentedFrameAtSvg
+            > VIDEO_FRAME_STALL_TIMEOUT_SVG_MS
+    ) {{
+        pauseForVideoBufferingSvg();
+    }}
     if (lastFrameAtSvg !== null) {{
         maxFrameGapSvg = Math.max(maxFrameGapSvg, timestamp - lastFrameAtSvg);
     }}
@@ -2408,6 +2433,7 @@ pvSvg.addEventListener('playing', () => {{
     // `playing` 也会在解码卡顿恢复时触发。每次都以 PV 重新锚定，
     // 再由首个实际呈现帧修正解码时钟与可见画面的差值。
     videoBufferingSvg = false;
+    lastPresentedFrameAtSvg = performance.now();
     reanchorToVideoFrameSvg(pvSvg.currentTime, true);
     startStripAnimationSvg(pvSvg.currentTime);
     scheduleVideoFrameSvg();
@@ -2431,12 +2457,16 @@ pvSvg.addEventListener('seeking', () => {{
 pvSvg.addEventListener('seeked', () => {{
     anchorClockSvg();
     if (playingSvg) {{
+        lastPresentedFrameAtSvg = performance.now();
         startStripAnimationSvg(pvSvg.currentTime);
         scheduleVideoFrameSvg();
     }}
     renderAllSvg(true);
 }});
 pvSvg.addEventListener('ended', pauseSvg);
+pvSvg.addEventListener('pause', () => {{
+    if (playingSvg && !pvSvg.ended && !seekingSvg) pauseSvg();
+}});
 pvSvg.addEventListener('error', refreshAvailabilitySvg);
 pvSvg.addEventListener('timeupdate', () => {{
     if (!playingSvg) renderAllSvg(true);
@@ -2513,14 +2543,19 @@ def output_needs_regeneration(song_dir, difficulty, out_path, force=False):
             return True
     except OSError:
         return True
-    offset_paths = [
+    input_paths = [
+        meter_file_path(song_dir, difficulty),
         offset_file_path(song_dir, difficulty),
         legacy_difficulty_path(song_dir, difficulty, '_offset.txt'),
     ]
-    if any(os.path.exists(path) and os.path.getmtime(path) > os.path.getmtime(out_path)
-           for path in offset_paths):
+    try:
+        output_mtime = Path(out_path).stat().st_mtime_ns
+        return any(
+            Path(path).is_file() and Path(path).stat().st_mtime_ns > output_mtime
+            for path in input_paths
+        )
+    except OSError:
         return True
-    return False
 
 
 def main():

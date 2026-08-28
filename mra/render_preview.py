@@ -72,6 +72,7 @@ ENABLE_OUTPUT_CROP = True
 ENABLE_KEY_SOUNDS = True
 KEY_SOUND_VOLUME = 0.7
 RECORDING_LEAD_IN_SECONDS = 5.0
+PREVIEW_AUDIO_BITRATE = "256k"
 
 def recorder_ffmpeg_arguments(codec: str = "libx264",
                               quality: str = RECORD_QUALITY) -> str:
@@ -749,7 +750,10 @@ def crop_recorded_preview(ffmpeg: str, source: Path, output: Path) -> None:
             "-vf", crop_filter,
             *encoder_args(codec, RECORD_QUALITY),
             "-pix_fmt", "yuv420p",
-            "-c:a", "copy",
+            # MajdataView's recording AAC can contain packets that FFmpeg's
+            # software decoder tolerates but Chromium stops on.  Re-encode the
+            # final preview audio instead of preserving those packets verbatim.
+            "-c:a", "aac", "-b:a", PREVIEW_AUDIO_BITRATE,
             "-movflags", "+faststart",
             str(temp_output),
         ]

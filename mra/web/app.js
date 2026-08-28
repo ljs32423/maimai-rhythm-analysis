@@ -430,6 +430,17 @@ async function startJob() {
     return;
   }
   await withBusy($("runButton"), async () => {
+    // “开始完整处理”就是一次提交：先落盘编辑器中的修改，
+    // 避免后端任务读到上一版拍号/扫键标记。校验失败时 dirty
+    // 仍保持 true，不会误启动生成。
+    if (state.dirty.meter) {
+      await saveMeter();
+      if (state.dirty.meter) return;
+    }
+    if (state.dirty.sweep) {
+      await saveSweep();
+      if (state.dirty.sweep) return;
+    }
     const job = await api("/api/jobs", {
       method: "POST",
       body: JSON.stringify({

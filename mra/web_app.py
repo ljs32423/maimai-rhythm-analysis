@@ -29,15 +29,13 @@ from .config import (ConfigError, load_config, resolve_songs_root, save_config,
                      validate_config)
 from .difficulty import (DIFFICULTY_NAMES, analysis_html_path,
                          difficulty_output_dir, meter_file_path,
-                         legacy_sweep_maidata_path,
                          preview_video_path, rhythm_svg_path,
                          sweep_maidata_path)
 from .ffmpeg_capabilities import detect_capabilities, find_binary
 from .meter import MeterMap, load_meter_map
 from .simai_parser import parse_maidata, parse_maidata_content
 from .song_library import PROJECT_ROOT
-from .sweep_marks import (SweepDifficultyMissingError,
-                          extract_sweep_difficulty, reflow_sweep_maidata,
+from .sweep_marks import (extract_sweep_difficulty, reflow_sweep_maidata,
                           sweep_maidata_semantically_equal)
 from .web_jobs import JobManager
 
@@ -148,24 +146,10 @@ def _reflow_sweep_for_difficulty(
 
 
 def _sweep_baseline(song_dir: Path, difficulty: int) -> tuple[str, str, bool]:
-    """Load a per-difficulty file or project a read-only legacy/source file."""
+    """Load this difficulty's manual file, or project the source chart."""
     path = sweep_maidata_path(song_dir, difficulty)
     if path.is_file():
         return path.read_text(encoding="utf-8"), "difficulty", True
-
-    legacy = legacy_sweep_maidata_path(song_dir)
-    if legacy.is_file():
-        try:
-            return (
-                extract_sweep_difficulty(
-                    legacy.read_text(encoding="utf-8"), difficulty,
-                ),
-                "legacy",
-                False,
-            )
-        except SweepDifficultyMissingError:
-            # Some old aggregate files may not contain every source difficulty.
-            pass
 
     source = (song_dir / "maidata.txt").read_text(encoding="utf-8")
     return extract_sweep_difficulty(source, difficulty), "maidata", False
@@ -248,10 +232,7 @@ def _song_info(song_dir: Path) -> dict[str, Any]:
         "genre": song.genre,
         "version": song.version,
         "cover_url": _cover_url(song_dir, cover),
-        "sweep_exists": (
-            any_difficulty_sweep
-            or legacy_sweep_maidata_path(song_dir).is_file()
-        ),
+        "sweep_exists": any_difficulty_sweep,
         "difficulties": difficulties,
     }
 
@@ -313,10 +294,7 @@ def _song_summary(song_dir: Path) -> dict[str, Any]:
         "genre": _maidata_field(content, "genre"),
         "version": _maidata_field(content, "version"),
         "cover_url": _cover_url(song_dir, cover),
-        "sweep_exists": (
-            any_difficulty_sweep
-            or legacy_sweep_maidata_path(song_dir).is_file()
-        ),
+        "sweep_exists": any_difficulty_sweep,
         "difficulties": difficulties,
     }
 
@@ -816,10 +794,11 @@ def create_app(
     @app.get("/library/{relative:path}")
     def library(relative: str):
         path = _safe_library_file(root, relative)
-        # analysis.html 内联了本次自动对齐的 offset。禁止复用旧页面，
-        # 否则重新处理后新文件已落盘，新打开的前端仍可能带着旧延迟。
+        # analysis.html 内联了本次 offset，SVG 则内联了拍号网格。
+        # 禁止复用这两类旧产物，否则重新处理后文件已落盘，
+        # 新打开的前端仍可能显示旧延迟或旧节奏条。
         headers = ({"Cache-Control": "no-store"}
-                   if path.suffix.casefold() == ".html" else None)
+                   if path.suffix.casefold() in {".html", ".svg"} else None)
         return FileResponse(path, headers=headers)
 
     @app.exception_handler(ConfigError)

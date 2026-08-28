@@ -2,8 +2,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from mra.difficulty import (legacy_sweep_maidata_path, rhythm_svg_path,
-                            sweep_maidata_path)
+from mra.difficulty import rhythm_svg_path, sweep_maidata_path
 from mra.meter import MeterMap
 from mra.simai_parser import parse_maidata
 from mra.sweep_marks import (apply_sweep_maidata, extract_sweep_difficulty,
@@ -197,7 +196,6 @@ class SweepMarksTests(unittest.TestCase):
             self.assertNotIn('&inote_6=', marker_content)
             self.assertEqual(marker_path, sweep_maidata_path(song, 5))
             self.assertFalse(sweep_maidata_path(song, 6).exists())
-            self.assertFalse(legacy_sweep_maidata_path(song).exists())
             self.assertEqual(
                 strip_sweep_markers(marker_content),
                 extract_sweep_difficulty(
@@ -214,67 +212,26 @@ class SweepMarksTests(unittest.TestCase):
             self.assertFalse(created_again)
             self.assertEqual(same_path.read_bytes(), edited)
 
-    def test_legacy_aggregate_is_losslessly_migrated_per_difficulty(self):
+    def test_root_level_sweep_file_is_ignored_during_initialization(self):
         with tempfile.TemporaryDirectory() as tmp:
             song = self.make_song(Path(tmp))
-            legacy_content = MAIDATA.replace(
+            root_content = MAIDATA.replace(
                 '{24}8,1,2', '{24}8/S,1,2',
             ).replace(
                 '{16}4,6,8', '{16}4/S,6,8',
             ).replace('\n', '\r\n')
-            legacy_path = legacy_sweep_maidata_path(song)
-            legacy_path.write_bytes(legacy_content.encode('utf-8'))
-            legacy_before = legacy_path.read_bytes()
+            root_path = song / 'maidata_sweep.txt'
+            root_path.write_bytes(root_content.encode('utf-8'))
+            root_before = root_path.read_bytes()
 
             master_path, master_created = self.initialize(song, 5)
             remaster_path, remaster_created = self.initialize(song, 6)
 
-            master_expected = """&title=Sweep Test
-&artist=Tester
-&wholebpm=120
-&first=0
-&lv_5=13
-&inote_5=(120){24}8/S,1,2,E
-""".replace('\n', '\r\n').encode('utf-8')
-            remaster_expected = """&title=Sweep Test
-&artist=Tester
-&wholebpm=120
-&first=0
-&lv_6=14
-&inote_6=(120){16}4/S,6,8,E
-""".replace('\n', '\r\n').encode('utf-8')
             self.assertTrue(master_created)
             self.assertTrue(remaster_created)
-            self.assertEqual(master_path.read_bytes(), master_expected)
-            self.assertEqual(remaster_path.read_bytes(), remaster_expected)
-            self.assertEqual(legacy_path.read_bytes(), legacy_before)
-
-            master_events = self.chart_events(song, 5)
-            remaster_events = self.chart_events(song, 6)
-            apply_sweep_maidata(master_events, song, 5)
-            apply_sweep_maidata(remaster_events, song, 6)
-            self.assertTrue(master_events[0]['is_sweep_start'])
-            self.assertTrue(remaster_events[0]['is_sweep_start'])
-            self.assertEqual(legacy_path.read_bytes(), legacy_before)
-
-    def test_unprojectable_legacy_target_never_falls_back_to_source(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            song = self.make_song(Path(tmp))
-            legacy_path = legacy_sweep_maidata_path(song)
-            legacy_path.write_text(
-                MAIDATA.replace(
-                    '&inote_5=(120){24}8,1,2,E',
-                    ' &inote_5=(120){24}8/S,1,2,E',
-                ),
-                encoding='utf-8',
-            )
-            preserved = legacy_path.read_bytes()
-
-            with self.assertRaisesRegex(ValueError, '存在，但无法安全投影'):
-                self.initialize(song, 5)
-
-            self.assertEqual(legacy_path.read_bytes(), preserved)
-            self.assertFalse(sweep_maidata_path(song, 5).exists())
+            self.assertIn('{24}8/S,1,2', master_path.read_text(encoding='utf-8'))
+            self.assertNotIn('/S', remaster_path.read_text(encoding='utf-8'))
+            self.assertEqual(root_path.read_bytes(), root_before)
 
     def test_marker_presence_is_authoritative_for_add_and_remove(self):
         with tempfile.TemporaryDirectory() as tmp:

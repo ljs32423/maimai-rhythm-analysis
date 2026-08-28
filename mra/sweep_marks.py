@@ -10,7 +10,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Iterable, Mapping
 
-from .difficulty import legacy_sweep_maidata_path, sweep_maidata_path
+from .difficulty import sweep_maidata_path
 from .meter import MeterMap, MeterMeasure
 from .simai_parser import (Note, NoteType, parse_inote, parse_maidata,
                            parse_maidata_content, time_to_beat)
@@ -517,23 +517,12 @@ def ensure_sweep_maidata(
         raise FileNotFoundError(f'Missing maidata.txt: {song_root}')
 
     source_content = source.read_bytes().decode('utf-8')
-    selected: str | None = None
-    legacy = legacy_sweep_maidata_path(song_root)
-    if legacy.is_file():
-        try:
-            selected = extract_sweep_difficulty(
-                legacy.read_bytes().decode('utf-8'), difficulty,
-            )
-        except SweepDifficultyMissingError:
-            selected = None
-
-    if selected is None:
-        selected = extract_sweep_difficulty(source_content, difficulty)
-        if sweep_times is not None:
-            bpm = parse_maidata_content(selected).bpm
-            selected = _seed_sweep_markers(
-                selected, bpm, {difficulty: sweep_times},
-            )
+    selected = extract_sweep_difficulty(source_content, difficulty)
+    if sweep_times is not None:
+        bpm = parse_maidata_content(selected).bpm
+        selected = _seed_sweep_markers(
+            selected, bpm, {difficulty: sweep_times},
+        )
 
     parsed = parse_maidata_content(selected)
     if set(parsed.charts) != {difficulty}:

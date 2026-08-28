@@ -9,12 +9,10 @@ from unittest import mock
 from fastapi import HTTPException
 from fastapi.testclient import TestClient
 
-from mra.difficulty import (legacy_sweep_maidata_path,
-                            sweep_maidata_path)
+from mra.difficulty import sweep_maidata_path
 from mra.simai_parser import parse_maidata_content
-from mra.sweep_marks import (extract_sweep_difficulty,
-                             sweep_maidata_semantically_equal)
-from mra.web_app import (_atomic_text, _safe_song, _song_catalog_summary,
+from mra.sweep_marks import sweep_maidata_semantically_equal
+from mra.web_app import (WEB_ROOT, _atomic_text, _safe_song, _song_catalog_summary,
                          create_app)
 
 
@@ -101,6 +99,33 @@ class WebAppTests(unittest.TestCase):
         self.assertEqual(response.headers["cache-control"], "no-store")
         self.assertIn("fresh offset", response.text)
 
+    def test_generated_rhythm_svg_is_never_served_from_stale_cache(self):
+        strip = self.song / "outputs" / "MASTER" / "strip" / "strip.svg"
+        strip.parent.mkdir(parents=True)
+        strip.write_text("<svg></svg>", encoding="utf-8")
+
+        response = self.client.get(
+            "/library/Web%20Test/outputs/MASTER/strip/strip.svg",
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.headers["cache-control"], "no-store")
+
+    def test_starting_job_saves_dirty_editors_before_submission(self):
+        script = (WEB_ROOT / "app.js").read_text(encoding="utf-8")
+        start_job = script.split("async function startJob()", 1)[1].split(
+            "function renderJob(job)", 1,
+        )[0]
+
+        self.assertLess(
+            start_job.index("await saveMeter();"),
+            start_job.index('await api("/api/jobs"'),
+        )
+        self.assertLess(
+            start_job.index("await saveSweep();"),
+            start_job.index('await api("/api/jobs"'),
+        )
+
     def test_meter_can_be_saved_and_reloaded(self):
         payload = {
             "data": {
@@ -164,7 +189,6 @@ class WebAppTests(unittest.TestCase):
         self.assertEqual(saved.status_code, 200)
         self.assertTrue(sweep_maidata_path(self.song, 5).is_file())
         self.assertFalse(sweep_maidata_path(self.song, 6).exists())
-        self.assertFalse(legacy_sweep_maidata_path(self.song).exists())
         self.assertEqual(
             self.client.get("/api/songs/Web%20Test/sweep/6").json()["content"],
             remaster["content"],
@@ -189,38 +213,28 @@ class WebAppTests(unittest.TestCase):
             400,
         )
 
-    def test_legacy_aggregate_is_projected_read_only_then_saved_separately(self):
+    def test_root_level_sweep_file_is_ignored(self):
         (self.song / "maidata.txt").write_text(MULTI_MAIDATA, encoding="utf-8")
-        legacy_content = MULTI_MAIDATA.replace(
+        root_content = MULTI_MAIDATA.replace(
             "1,2,3,E", "1/S,2,3,E",
         ).replace("4,5,6,E", "4/S,5,6,E")
-        legacy_path = legacy_sweep_maidata_path(self.song)
-        legacy_path.write_bytes(legacy_content.replace("\n", "\r\n").encode("utf-8"))
-        preserved = legacy_path.read_bytes()
+        root_path = self.song / "maidata_sweep.txt"
+        root_path.write_bytes(root_content.replace("\n", "\r\n").encode("utf-8"))
+        preserved = root_path.read_bytes()
 
         master = self.client.get("/api/songs/Web%20Test/sweep/5").json()
 
         self.assertFalse(master["exists"])
-        self.assertEqual(master["source"], "legacy")
-        self.assertIn("1/S,2,3", master["content"])
+        self.assertEqual(master["source"], "maidata")
+        self.assertNotIn("/S", master["content"])
         self.assertNotIn("&inote_6=", master["content"])
-        self.assertTrue(sweep_maidata_semantically_equal(
-            extract_sweep_difficulty(legacy_content, 5), master["content"],
-        ))
-        self.assertEqual(legacy_path.read_bytes(), preserved)
-
-        saved = self.client.put(
-            "/api/songs/Web%20Test/sweep/5",
-            json={"content": master["content"]},
-        )
-
-        self.assertEqual(saved.status_code, 200)
-        self.assertTrue(sweep_maidata_path(self.song, 5).is_file())
-        self.assertFalse(sweep_maidata_path(self.song, 6).exists())
-        self.assertEqual(legacy_path.read_bytes(), preserved)
+        self.assertEqual(root_path.read_bytes(), preserved)
         remaster = self.client.get("/api/songs/Web%20Test/sweep/6").json()
-        self.assertEqual(remaster["source"], "legacy")
-        self.assertIn("4/S,5,6", remaster["content"])
+        self.assertEqual(remaster["source"], "maidata")
+        self.assertNotIn("/S", remaster["content"])
+
+        song = self.client.get("/api/songs/Web%20Test").json()
+        self.assertFalse(song["sweep_exists"])
 
     def test_sweep_editor_cannot_change_chart_structure(self):
         changed = MAIDATA.replace("1,2,3,E", "1,2,4,E")
