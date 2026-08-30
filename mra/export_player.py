@@ -26,6 +26,7 @@ from .meter import ensure_meter_file
 from .simai_parser import parse_maidata, time_to_beat
 from .song_library import PROJECT_ROOT, find_song_dirs
 from .visualize import (
+    AnalysisContext,
     LABEL_AREA_H,
     LABEL_GAP,
     LONG_IMAGE_EXTRA_MEASURES,
@@ -148,19 +149,21 @@ def _file_fingerprints(song_dir: Path, difficulty: int,
 
 
 def export_player(song_dir: str | Path, difficulty: int,
-                  force: bool = False) -> Path:
+                  force: bool = False, *,
+                  analysis: AnalysisContext | None = None) -> Path:
     """Export one exact song folder without discovering or renaming it."""
     song_root = Path(song_dir).resolve()
     maidata = song_root / "maidata.txt"
     if not maidata.is_file():
         raise FileNotFoundError(f"Missing maidata.txt: {song_root}")
-    song = parse_maidata(str(maidata))
+    song = analysis.song if analysis is not None else parse_maidata(str(maidata))
     if difficulty not in song.charts:
         raise ValueError(f"{song.title} has no difficulty {difficulty}")
     chart = song.charts[difficulty]
     if not chart.notes:
         raise ValueError(f"{song.title} difficulty {difficulty} contains no notes")
-    ensure_sweep_maidata_for_song(song_root, song, difficulty)
+    if analysis is None:
+        ensure_sweep_maidata_for_song(song_root, song, difficulty)
 
     last_note_time = max(note.time_sec + note.duration_sec for note in chart.notes)
     last_note_beat = time_to_beat(last_note_time, chart.bpm_timeline)
@@ -187,11 +190,17 @@ def export_player(song_dir: str | Path, difficulty: int,
         except (OSError, ValueError, TypeError):
             pass
 
-    events = compute_rhythm_events(chart)
-    apply_sweep_maidata(events, song_root, difficulty)
-    primitives, _ = build_primitives(
-        events, row_beats, total_beats, song.bpm, chart, meter_map,
-    )
+    if analysis is None:
+        events = compute_rhythm_events(chart)
+        apply_sweep_maidata(events, song_root, difficulty)
+        primitives, _ = build_primitives(
+            events, row_beats, total_beats, song.bpm, chart, meter_map,
+        )
+    else:
+        events = analysis.events
+        primitives, _ = analysis.primitives(
+            row_beats, total_beats, meter_map,
+        )
     serialized = [_serialize_primitive(primitive, order)
                   for order, primitive in enumerate(primitives)]
     serialized.sort(key=lambda item: (item["x0"], item["order"]))

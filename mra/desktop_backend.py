@@ -7,6 +7,7 @@ import contextlib
 import io
 import json
 import sys
+import time
 import traceback
 from pathlib import Path
 from typing import Callable
@@ -18,7 +19,8 @@ from .init_meter import process_song as init_meter
 from .make_html import generate_html
 from .render_preview import record_preview, require_majdata_view
 from .simai_parser import parse_maidata
-from .visualize import process_song as visualize_song
+from .visualize import (AnalysisContext, prepare_analysis_context,
+                        process_song as visualize_song)
 
 
 def emit(event: str, **payload) -> None:
@@ -33,13 +35,28 @@ def _captured(action: Callable[[], object]) -> tuple[object, str]:
 
 
 def _run_step(index: int, total: int, name: str,
-              action: Callable[[], object]) -> object:
+              action: Callable[[], object],
+              timings: dict[str, float] | None = None) -> object:
     emit("step", name=name, status="started", index=index, total=total)
-    result, details = _captured(action)
+    started = time.perf_counter()
+    try:
+        result, details = _captured(action)
+    except Exception:
+        duration = time.perf_counter() - started
+        if timings is not None:
+            timings[name] = duration
+        emit("step", name=name, status="failed", index=index, total=total,
+             duration_sec=round(duration, 6))
+        raise
+    duration = time.perf_counter() - started
+    if timings is not None:
+        timings[name] = duration
     if details:
         print(details, file=sys.stderr)
-    emit("progress", value=index / total, step=name)
-    emit("step", name=name, status="completed", index=index, total=total)
+    emit("progress", value=index / total, step=name,
+         duration_sec=round(duration, 6))
+    emit("step", name=name, status="completed", index=index, total=total,
+         duration_sec=round(duration, 6))
     return result
 
 
@@ -48,13 +65,26 @@ def export_only(song_dir: Path, difficulty: int, force: bool) -> Path:
 
 
 def analyze(song_dir: Path, difficulty: int, force: bool,
-            timeout: int) -> Path:
+            timeout: int, *, song=None) -> Path:
     """Run the existing workflow against one exact folder, without renaming it."""
     total = 6
-    _run_step(1, total, "meter", lambda: init_meter(song_dir, [difficulty]))
+    timings: dict[str, float] = {}
+    contexts: dict[int, AnalysisContext] = {}
+    song = song or parse_maidata(str(song_dir / "maidata.txt"))
+    _run_step(1, total, "meter", lambda: init_meter(song_dir, [difficulty]), timings)
+
+    def render_rhythm():
+        context = prepare_analysis_context(song_dir, difficulty, song=song)
+        contexts[difficulty] = context
+        return visualize_song(
+            song_dir, song_dir.name, force, [difficulty],
+            contexts=contexts, song=song,
+        )
+
     stats = _run_step(
         2, total, "rhythm",
-        lambda: visualize_song(song_dir, song_dir.name, force, [difficulty]),
+        render_rhythm,
+        timings,
     )
     if isinstance(stats, dict) and (stats.get("error") or stats.get("errors")):
         raise RuntimeError(stats.get("error") or "; ".join(stats["errors"]))
@@ -65,19 +95,28 @@ def analyze(song_dir: Path, difficulty: int, force: bool,
         return record_preview(require_majdata_view(), song_dir, difficulty,
                               force=False, timeout=timeout)
 
-    _run_step(3, total, "preview", ensure_preview)
+    _run_step(3, total, "preview", ensure_preview, timings)
 
     def refresh_alignment():
-        result = align_song(str(song_dir), song_dir.name, difficulty, force=True)
+        result = align_song(
+            str(song_dir), song_dir.name, difficulty, force=force,
+            analysis=contexts[difficulty],
+        )
         if result is None:
             raise RuntimeError("audio alignment failed")
         return result
 
-    _run_step(4, total, "alignment", refresh_alignment)
+    _run_step(4, total, "alignment", refresh_alignment, timings)
     _run_step(5, total, "html",
-              lambda: generate_html(str(song_dir), song_dir.name, difficulty, 0.0))
+              lambda: generate_html(
+                  str(song_dir), song_dir.name, difficulty, 0.0,
+                  analysis=contexts[difficulty], force=force,
+              ), timings)
     return _run_step(6, total, "player_export",
-                     lambda: export_player(song_dir, difficulty, force))
+                     lambda: export_player(
+                         song_dir, difficulty, force,
+                         analysis=contexts[difficulty],
+                     ), timings)
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -108,7 +147,9 @@ def main(argv: list[str] | None = None) -> int:
         if args.command == "export":
             manifest = export_only(song_dir, args.difficulty, args.force)
         else:
-            manifest = analyze(song_dir, args.difficulty, args.force, args.timeout)
+            manifest = analyze(
+                song_dir, args.difficulty, args.force, args.timeout, song=song,
+            )
         emit("completed", manifest=str(manifest), song=song.title,
              difficulty=args.difficulty)
         return 0

@@ -32,6 +32,7 @@ class AnalysisJob:
     finished_at: str | None = None
     manifest: str | None = None
     error: str | None = None
+    timings: dict[str, float] = field(default_factory=dict)
     process: subprocess.Popen | None = field(default=None, repr=False)
     future: Future | None = field(default=None, repr=False)
     cancel_requested: bool = False
@@ -51,6 +52,7 @@ class AnalysisJob:
             "finished_at": self.finished_at,
             "manifest": self.manifest,
             "error": self.error,
+            "timings": dict(self.timings),
         }
 
 
@@ -159,6 +161,13 @@ class JobManager:
                 job.step = str(event.get("step", job.step))
             elif kind == "step":
                 job.step = str(event.get("name", job.step))
+                if event.get("status") in {"completed", "failed"}:
+                    try:
+                        duration = float(event["duration_sec"])
+                    except (KeyError, TypeError, ValueError):
+                        pass
+                    else:
+                        job.timings[job.step] = max(0.0, duration)
             elif kind == "completed":
                 job.manifest = event.get("manifest")
             elif kind == "error":

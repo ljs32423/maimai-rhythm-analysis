@@ -79,7 +79,7 @@
       </div>
       <div id="difficultyTabs" class="tabs"></div>
       <div class="workspace-actions panel">
-        <label class="check"><input id="forceInput" type="checkbox"> 强制重建可视化</label>
+        <label class="check"><input id="forceInput" type="checkbox"> 强制重建并重新对齐</label>
         <button id="runButton">开始完整处理</button>
         <a id="analysisLink" class="button-link disabled" target="_blank" rel="noopener">打开分析页面</a>
       </div>
@@ -111,6 +111,7 @@
           <strong id="jobStatus">尚未启动任务</strong>
           <button id="cancelButton" class="danger hidden">停止任务</button>
         </div>
+        <div id="jobTimings" class="job-timings hidden"></div>
         <pre id="jobLog"></pre>
       </section>
     </section>

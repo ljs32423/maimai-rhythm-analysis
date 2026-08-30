@@ -25,6 +25,7 @@ from urllib.parse import quote
 from .simai_parser import parse_maidata, time_to_beat
 from .meter import load_meter_map
 from .visualize import (compute_rhythm_events, PX_PER_BEAT, PAD_X,
+                        AnalysisContext,
                         NOTE_AREA_H, LABEL_GAP, LABEL_AREA_H, NOTE_CY,
                         NOTE_OUTER_DIAMETER, SEGMENT_BEATS,
                         STRIP_SEGMENT_BLEED_PX, STRIP_SEGMENT_MARKER,
@@ -35,14 +36,17 @@ from .difficulty import (DIFFICULTY_NAMES, analysis_html_path, default_target_di
                          legacy_difficulty_path,
                          meter_file_path,
                          offset_file_path, preview_video_candidates,
-                         strip_segment_base_path, strip_svg_path)
+                         strip_segment_base_path, strip_svg_path,
+                         sweep_maidata_path)
 from .song_library import PROJECT_ROOT, find_song_dirs
 from .sweep_marks import apply_sweep_maidata
+from .build_cache import (BuildCache, file_fingerprint, fingerprint_digest,
+                          media_fingerprint)
 
 # Arcaea 常量 (与 4.py 完全一致)
 # 降低滚动条整体缩放，等价于降低屏幕上“每拍经过的像素数”，从而减慢观感滚动速度。
 SVG_SCALE = 1.8
-PLAYER_RENDERER_VERSION = 13
+PLAYER_RENDERER_VERSION = 15
 
 
 ANALYSIS_SERVER_SCRIPT = r'''#!/usr/bin/env python3
@@ -202,9 +206,49 @@ def build_timing_segments(chart):
     ]
 
 
-def generate_html(song_dir, song_id, diff_id=5, offset=0.0):
+def _html_input_fingerprint(
+    song_dir: str | Path,
+    difficulty: int,
+    requested_offset: float = 0.0,
+) -> str:
+    song_root = Path(song_dir)
+    segment_dir = strip_segment_base_path(song_root, difficulty).parent
+    segments = {
+        path.name: file_fingerprint(path)
+        for path in sorted(segment_dir.glob("strip_seg_*.svg"))
+    }
+    preview_name = find_preview_video(str(song_root), difficulty)
+    preview = song_root / preview_name if preview_name else None
+    modern_offset = offset_file_path(song_root, difficulty)
+    legacy_offset = legacy_difficulty_path(song_root, difficulty, "_offset.txt")
+    offset = modern_offset if modern_offset.is_file() else legacy_offset
+    return fingerprint_digest({
+        "renderer_version": PLAYER_RENDERER_VERSION,
+        "difficulty": int(difficulty),
+        "requested_offset": round(float(requested_offset), 9),
+        "svg_scale": SVG_SCALE,
+        "segment_bleed_px": STRIP_SEGMENT_BLEED_PX,
+        "maidata": file_fingerprint(song_root / "maidata.txt"),
+        "sweep": file_fingerprint(sweep_maidata_path(song_root, difficulty)),
+        "meter": file_fingerprint(meter_file_path(song_root, difficulty)),
+        "offset": file_fingerprint(offset),
+        "strip_svg": file_fingerprint(strip_svg_path(song_root, difficulty)),
+        "segments": segments,
+        "preview": media_fingerprint(preview),
+    })
+
+
+def generate_html(song_dir, song_id, diff_id=5, offset=0.0, *,
+                  analysis: AnalysisContext | None = None,
+                  force: bool = False):
     song_root = Path(song_dir)
     out_path = analysis_html_path(song_root, diff_id)
+    build_cache = BuildCache(song_root, diff_id)
+    initial_fingerprint = _html_input_fingerprint(song_root, diff_id, offset)
+    if not force and build_cache.matches(
+        "analysis_html", initial_fingerprint, [out_path],
+    ):
+        return str(out_path)
     html_dir = out_path.parent
     html_dir.mkdir(parents=True, exist_ok=True)
 
@@ -253,23 +297,30 @@ def generate_html(song_dir, song_id, diff_id=5, offset=0.0):
         )
         return
 
-    song = parse_maidata(maidata)
+    song = analysis.song if analysis is not None else parse_maidata(maidata)
     if diff_id not in song.charts:
         print(f'  [{song_id}] 无难度 {diff_name}')
         return
-    sweep_path, sweep_created = ensure_sweep_maidata_for_song(
-        song_root, song, diff_id,
-    )
-    if sweep_created:
-        print(
-            f'  [{song_id}] 已创建人工扫键标记文件 '
-            f'{sweep_path.relative_to(song_root)}',
+    if analysis is None:
+        sweep_path, sweep_created = ensure_sweep_maidata_for_song(
+            song_root, song, diff_id,
         )
+        if sweep_created:
+            print(
+                f'  [{song_id}] 已创建人工扫键标记文件 '
+                f'{sweep_path.relative_to(song_root)}',
+            )
     ch = song.charts[diff_id]
     if not ch.notes:
         return
-    rhythm_events = compute_rhythm_events(ch)
-    sweep_result = apply_sweep_maidata(rhythm_events, song_root, diff_id)
+    rhythm_events = (
+        analysis.events if analysis is not None
+        else compute_rhythm_events(ch)
+    )
+    sweep_result = (
+        analysis.sweep_result if analysis is not None
+        else apply_sweep_maidata(rhythm_events, song_root, diff_id)
+    )
     if sweep_result.created:
         print(f'  [{song_id}] 已创建人工扫键标记文件 {sweep_result.path.name}')
     for warning in sweep_result.warnings:
@@ -397,15 +448,22 @@ def generate_html(song_dir, song_id, diff_id=5, offset=0.0):
         last_position = len(found_segments) - 1
         for position, (index, name) in enumerate(found_segments):
             if index == 0:
-                x = 0
-                width = min(svg_w, PAD_X + segment_width)
+                nominal_x = 0
+                nominal_end = min(svg_w, PAD_X + segment_width)
             else:
-                x = PAD_X + index * segment_width
-                width = min(segment_width, max(1, svg_w - x))
-            if position < last_position:
-                # 与生成端的内容出血保持一致：相邻分段重叠 2px 相同内容，
-                # 覆盖边缘抗锯齿半透明像素，消除滚动时的拼接亮缝。
-                width = min(width + STRIP_SEGMENT_BLEED_PX, max(1, svg_w - x))
+                nominal_x = PAD_X + index * segment_width
+                nominal_end = min(svg_w, PAD_X + (index + 1) * segment_width)
+            x = max(
+                0,
+                nominal_x - (STRIP_SEGMENT_BLEED_PX if position else 0),
+            )
+            end = min(
+                svg_w,
+                nominal_end + (
+                    STRIP_SEGMENT_BLEED_PX if position < last_position else 0
+                ),
+            )
+            width = max(1, end - x)
             segments_js.append({
                 'src': asset_url(segment_dir / name),
                 'x': round(x, 3),
@@ -616,7 +674,7 @@ body {{
     pointer-events: none;
     user-select: none;
     image-rendering: auto;
-    contain: strict;
+    backface-visibility: hidden;
     /* 分段通过父层 transform 从数万像素外平移进视口。Chromium 的
        content-visibility:auto 偶尔会继续把已经移入视口的分段当成离屏
        内容，导致节奏条只有播放标记而没有音符；这里必须保持正常绘制。 */
@@ -1659,6 +1717,12 @@ const HAS_SEGMENTS_SVG = SEGMENTS_SVG.length > 0;
 const STATUS_INTERVAL_SVG_MS = 100;
 const VIDEO_FRAME_SYNC_TOLERANCE_SVG = 0.035;
 const VIDEO_FRAME_STALL_TIMEOUT_SVG_MS = 350;
+const SEGMENT_BEATS_SVG = {SEGMENT_BEATS};
+const SEGMENT_WINDOW_BEHIND_SVG = 2;
+const SEGMENT_LOOKAHEAD_SECONDS_SVG = 10;
+const SEGMENT_MIN_AHEAD_SVG = 4;
+const SEGMENT_MAX_AHEAD_SVG = 14;
+const SEGMENT_SOURCE_WARM_CONCURRENCY_SVG = 4;
 
 const virtualStripSvg = document.getElementById('virtualStrip');
 const fullStripSvg = document.getElementById('svgScroll');
@@ -1714,6 +1778,18 @@ let presentedVideoTimeSvg = null;
 let lastPresentedFrameAtSvg = null;
 let videoFrameCallbackSvg = null;
 let videoBufferingSvg = false;
+const mountedSegmentsSvg = new Map();
+const segmentSourceBlobsSvg = new Map();
+const segmentSourcePromisesSvg = new Map();
+let requestedSegmentWindowKeySvg = null;
+let segmentWindowPromiseSvg = Promise.resolve();
+let segmentWindowGenerationSvg = 0;
+let segmentWindowFirstSvg = -1;
+let segmentWindowLastSvg = -1;
+let segmentLoadCountSvg = 0;
+let segmentEvictionCountSvg = 0;
+let segmentWindowUpdateCountSvg = 0;
+let segmentDecodeFailureCountSvg = 0;
 
 if (window.location.protocol === 'file:') {{
     localFileWarningSvg.hidden = false;
@@ -2092,6 +2168,9 @@ function renderAllSvg(force = false) {{
     const videoTime = playbackTimeSvg();
     const state = renderStripSvg(videoTime);
     updateStatusSvg(videoTime, state, force);
+    if (segmentsReadySvg) {{
+        updateSegmentWindowSvg(videoTime).catch(handleSegmentWindowErrorSvg);
+    }}
 }}
 
 function frameSvg(timestamp) {{
@@ -2125,6 +2204,7 @@ function frameSvg(timestamp) {{
     const state = renderStripSvg(videoTime);
     if (timestamp - lastStatusAtSvg >= STATUS_INTERVAL_SVG_MS) {{
         updateStatusSvg(videoTime, state);
+        updateSegmentWindowSvg(videoTime).catch(handleSegmentWindowErrorSvg);
         lastStatusAtSvg = timestamp;
     }}
     rafSvg = requestAnimationFrame(frameSvg);
@@ -2224,45 +2304,300 @@ function refreshAvailabilitySvg() {{
     if (pvReadySvg) renderAllSvg(true);
 }}
 
+function publishSegmentStatsSvg() {{
+    document.body.dataset.svgMountedSegmentCount = String(
+        mountedSegmentsSvg.size
+    );
+    document.body.dataset.svgCachedSourceCount = String(
+        segmentSourceBlobsSvg.size
+    );
+    document.body.dataset.svgSegmentWindow = segmentWindowFirstSvg >= 0
+        ? segmentWindowFirstSvg + ':' + segmentWindowLastSvg
+        : '';
+    document.body.dataset.svgSegmentLoads = String(segmentLoadCountSvg);
+    document.body.dataset.svgSegmentEvictions = String(
+        segmentEvictionCountSvg
+    );
+    document.body.dataset.svgSegmentWindowUpdates = String(
+        segmentWindowUpdateCountSvg
+    );
+    document.body.dataset.svgSegmentDecodeFailures = String(
+        segmentDecodeFailureCountSvg
+    );
+}}
+
+function segmentWindowForTimeSvg(videoTime) {{
+    const state = videoStateSvg(videoTime);
+    const current = Math.max(0, Math.min(
+        SEGMENTS_SVG.length - 1,
+        Math.floor(Math.max(0, state.beat) / SEGMENT_BEATS_SVG)
+    ));
+    const playbackRate = Math.max(0.25, pvSvg.playbackRate || 1);
+    const chartTime = videoTime - VIDEO_OFFSET_SVG - delaySvgMs / 1000;
+    const horizon = chartTime
+        + SEGMENT_LOOKAHEAD_SECONDS_SVG * playbackRate;
+    let lookaheadBpm = state.bpm;
+    for (const timing of TIMINGS_SVG) {{
+        if (timing.time > horizon) break;
+        if (timing.time >= chartTime) {{
+            lookaheadBpm = Math.max(lookaheadBpm, timing.bpm);
+        }}
+    }}
+    const lookaheadBeats = lookaheadBpm / 60
+        * SEGMENT_LOOKAHEAD_SECONDS_SVG
+        * playbackRate;
+    const ahead = Math.max(
+        SEGMENT_MIN_AHEAD_SVG,
+        Math.min(
+            SEGMENT_MAX_AHEAD_SVG,
+            Math.ceil(lookaheadBeats / SEGMENT_BEATS_SVG) + 1
+        )
+    );
+    return {{
+        current,
+        first: Math.max(0, current - SEGMENT_WINDOW_BEHIND_SVG),
+        last: Math.min(SEGMENTS_SVG.length - 1, current + ahead),
+    }};
+}}
+
+function segmentSourceBlobSvg(index) {{
+    if (segmentSourceBlobsSvg.has(index)) {{
+        return Promise.resolve(segmentSourceBlobsSvg.get(index));
+    }}
+    if (segmentSourcePromisesSvg.has(index)) {{
+        return segmentSourcePromisesSvg.get(index);
+    }}
+    const promise = fetch(SEGMENTS_SVG[index].src, {{ cache: 'force-cache' }})
+        .then((response) => {{
+            if (!response.ok) {{
+                throw new Error(
+                    'SVG 分段读取失败 ' + index + ': HTTP ' + response.status
+                );
+            }}
+            return response.blob();
+        }})
+        .then((blob) => {{
+            segmentSourcePromisesSvg.delete(index);
+            segmentSourceBlobsSvg.set(index, blob);
+            publishSegmentStatsSvg();
+            return blob;
+        }})
+        .catch((error) => {{
+            segmentSourcePromisesSvg.delete(index);
+            throw error;
+        }});
+    segmentSourcePromisesSvg.set(index, promise);
+    return promise;
+}}
+
+function waitForSegmentImageSvg(image) {{
+    if (typeof image.decode === 'function') return image.decode();
+    return new Promise((resolve, reject) => {{
+        image.addEventListener('load', resolve, {{ once: true }});
+        image.addEventListener('error', reject, {{ once: true }});
+    }});
+}}
+
+function insertSegmentImageSvg(index, image) {{
+    for (const mounted of virtualStripSvg.children) {{
+        if (Number(mounted.dataset.segmentIndex) > index) {{
+            virtualStripSvg.insertBefore(image, mounted);
+            return;
+        }}
+    }}
+    virtualStripSvg.appendChild(image);
+}}
+
+function releaseMountedSegmentSvg(record) {{
+    record.cancelled = true;
+    if (record.image !== null) {{
+        record.image.remove();
+        record.image.removeAttribute('src');
+    }}
+    if (record.objectUrl !== null) {{
+        URL.revokeObjectURL(record.objectUrl);
+        record.objectUrl = null;
+    }}
+}}
+
+function unmountSegmentSvg(index) {{
+    const record = mountedSegmentsSvg.get(index);
+    if (!record) return;
+    mountedSegmentsSvg.delete(index);
+    releaseMountedSegmentSvg(record);
+    segmentEvictionCountSvg += 1;
+    publishSegmentStatsSvg();
+}}
+
+function mountSegmentSvg(index, priority = 'auto') {{
+    const existing = mountedSegmentsSvg.get(index);
+    if (existing) return existing.promise;
+    const segment = SEGMENTS_SVG[index];
+    const record = {{
+        index,
+        image: null,
+        objectUrl: null,
+        ready: false,
+        cancelled: false,
+        promise: null,
+    }};
+    record.promise = (async () => {{
+        const image = document.createElement('img');
+        record.image = image;
+        image.className = 'svg-segment';
+        image.width = segment.width;
+        image.height = {svg_h};
+        image.decoding = 'async';
+        image.loading = 'eager';
+        image.fetchPriority = priority;
+        image.draggable = false;
+        image.alt = '';
+        image.dataset.segmentIndex = String(index);
+        image.setAttribute('aria-hidden', 'true');
+        image.style.left = segment.x + 'px';
+        image.style.width = segment.width + 'px';
+        try {{
+            const blob = await segmentSourceBlobSvg(index);
+            if (record.cancelled) return null;
+            record.objectUrl = URL.createObjectURL(blob);
+            image.src = record.objectUrl;
+            await waitForSegmentImageSvg(image);
+        }} catch (blobError) {{
+            if (record.cancelled) return null;
+            if (record.objectUrl !== null) {{
+                URL.revokeObjectURL(record.objectUrl);
+                record.objectUrl = null;
+            }}
+            image.src = segment.src;
+            try {{
+                await waitForSegmentImageSvg(image);
+            }} catch (directError) {{
+                directError.cause = blobError;
+                throw directError;
+            }}
+        }}
+        if (
+            record.cancelled
+            || mountedSegmentsSvg.get(index) !== record
+        ) {{
+            releaseMountedSegmentSvg(record);
+            return null;
+        }}
+        insertSegmentImageSvg(index, image);
+        record.ready = true;
+        segmentLoadCountSvg += 1;
+        publishSegmentStatsSvg();
+        return image;
+    }})().catch((error) => {{
+        if (!record.cancelled) {{
+            segmentDecodeFailureCountSvg += 1;
+            if (mountedSegmentsSvg.get(index) === record) {{
+                mountedSegmentsSvg.delete(index);
+            }}
+            releaseMountedSegmentSvg(record);
+            publishSegmentStatsSvg();
+            throw error;
+        }}
+        return null;
+    }});
+    mountedSegmentsSvg.set(index, record);
+    publishSegmentStatsSvg();
+    return record.promise;
+}}
+
+function updateSegmentWindowSvg(videoTime) {{
+    if (!HAS_SEGMENTS_SVG) return Promise.resolve();
+    const windowRange = segmentWindowForTimeSvg(videoTime);
+    const key = windowRange.first + ':' + windowRange.last;
+    if (key === requestedSegmentWindowKeySvg) {{
+        return segmentWindowPromiseSvg;
+    }}
+    requestedSegmentWindowKeySvg = key;
+    const generation = ++segmentWindowGenerationSvg;
+    const wanted = new Set();
+    const ordered = [windowRange.current];
+    for (let distance = 1; ; distance++) {{
+        let added = false;
+        const ahead = windowRange.current + distance;
+        const behind = windowRange.current - distance;
+        if (ahead <= windowRange.last) {{
+            ordered.push(ahead);
+            added = true;
+        }}
+        if (behind >= windowRange.first) {{
+            ordered.push(behind);
+            added = true;
+        }}
+        if (!added) break;
+    }}
+    for (const index of ordered) wanted.add(index);
+    for (const [index, record] of mountedSegmentsSvg) {{
+        const committed = index >= segmentWindowFirstSvg
+            && index <= segmentWindowLastSvg;
+        if (!wanted.has(index) && !record.ready && !committed) {{
+            unmountSegmentSvg(index);
+        }}
+    }}
+    segmentWindowPromiseSvg = Promise.all(ordered.map((index) => (
+        mountSegmentSvg(
+            index,
+            Math.abs(index - windowRange.current) <= 1 ? 'high' : 'auto'
+        )
+    ))).then(() => {{
+        if (generation !== segmentWindowGenerationSvg) return;
+        for (const index of Array.from(mountedSegmentsSvg.keys())) {{
+            if (!wanted.has(index)) unmountSegmentSvg(index);
+        }}
+        segmentWindowFirstSvg = windowRange.first;
+        segmentWindowLastSvg = windowRange.last;
+        segmentWindowUpdateCountSvg += 1;
+        publishSegmentStatsSvg();
+    }}).catch((error) => {{
+        if (generation === segmentWindowGenerationSvg) {{
+            requestedSegmentWindowKeySvg = null;
+        }}
+        throw error;
+    }});
+    return segmentWindowPromiseSvg;
+}}
+
+async function warmSegmentSourcesSvg() {{
+    let cursor = 0;
+    const worker = async () => {{
+        while (cursor < SEGMENTS_SVG.length) {{
+            const index = cursor++;
+            await segmentSourceBlobSvg(index).catch(() => null);
+        }}
+    }};
+    await Promise.all(Array.from(
+        {{ length: SEGMENT_SOURCE_WARM_CONCURRENCY_SVG }},
+        () => worker()
+    ));
+}}
+
+function handleSegmentWindowErrorSvg(error) {{
+    console.warn('SVG segment window:', error);
+}}
+
 function prepareSegmentsSvg() {{
     if (!HAS_SEGMENTS_SVG) {{
         segmentsReadySvg = true;
         refreshAvailabilitySvg();
         return Promise.resolve();
     }}
-    const fragment = document.createDocumentFragment();
-    const decodes = [];
-    for (let index = 0; index < SEGMENTS_SVG.length; index++) {{
-        const segment = SEGMENTS_SVG[index];
-        const image = document.createElement('img');
-        image.className = 'svg-segment';
-        image.src = segment.src;
-        image.width = segment.width;
-        image.height = {svg_h};
-        image.decoding = 'sync';
-        image.loading = 'eager';
-        image.fetchPriority = 'high';
-        image.draggable = false;
-        image.alt = '';
-        image.setAttribute('aria-hidden', 'true');
-        image.style.left = segment.x + 'px';
-        image.style.width = segment.width + 'px';
-        fragment.appendChild(image);
-        if (typeof image.decode === 'function') {{
-            decodes.push(image.decode().catch(() => undefined));
-        }}
-    }}
-    virtualStripSvg.replaceChildren(fragment);
-    return Promise.all(decodes).then(() => {{
-        // Give Chromium one paint to upload decoded segment textures.
+    return updateSegmentWindowSvg(0).then(() => {{
+        // Give Chromium two paints to upload the initial high-resolution
+        // vector textures before enabling playback.
         return new Promise((resolve) => requestAnimationFrame(() => {{
             requestAnimationFrame(resolve);
         }}));
     }}).then(() => {{
         segmentsReadySvg = true;
         document.body.dataset.svgSegmentsReady = 'true';
+        document.body.dataset.svgResidentStrategy = 'windowed-vector';
         rebuildStripAnimationSvg();
         refreshAvailabilitySvg();
+        setTimeout(() => warmSegmentSourcesSvg(), 0);
     }});
 }}
 
@@ -2324,6 +2659,9 @@ function setRateSvg(value) {{
     speedSliderSvg.value = rate.toFixed(2);
     if (document.activeElement !== speedInputSvg) {{
         speedInputSvg.value = rate.toFixed(2);
+    }}
+    if (segmentsReadySvg) {{
+        updateSegmentWindowSvg(current).catch(handleSegmentWindowErrorSvg);
     }}
 }}
 
@@ -2490,6 +2828,14 @@ window.__RHYTHM_ANALYSIS__ = {{
         renderedFrames: renderedFramesSvg,
         maxFrameGapMs: maxFrameGapSvg,
         segmentCount: SEGMENTS_SVG.length,
+        mountedSegmentCount: mountedSegmentsSvg.size,
+        cachedSegmentSourceCount: segmentSourceBlobsSvg.size,
+        segmentWindow: [segmentWindowFirstSvg, segmentWindowLastSvg],
+        segmentLoads: segmentLoadCountSvg,
+        segmentEvictions: segmentEvictionCountSvg,
+        segmentWindowUpdates: segmentWindowUpdateCountSvg,
+        segmentDecodeFailures: segmentDecodeFailureCountSvg,
+        segmentResidentStrategy: 'windowed-vector',
         segmentsReady: segmentsReadySvg,
         usingSegments: HAS_SEGMENTS_SVG,
         videoPreloadState: videoPreloadStateSvg,
@@ -2507,7 +2853,12 @@ window.__RHYTHM_ANALYSIS__ = {{
 setRateSvg(1);
 setDelaySvg(0);
 refreshAvailabilitySvg();
-prepareSegmentsSvg();
+publishSegmentStatsSvg();
+prepareSegmentsSvg().catch((error) => {{
+    console.error('SVG segment preload:', error);
+    document.body.dataset.svgSegmentsReady = 'false';
+    refreshAvailabilitySvg();
+}});
 prepareVideoSvg().catch((error) => {{
     console.error('video metadata:', error);
     videoEmptySvg.title = String(error);
@@ -2522,6 +2873,9 @@ renderAllSvg(true);
     with open(out_path, 'w', encoding='utf-8') as f:
         f.write(html_content)
     write_analysis_launcher(html_dir)
+    final_fingerprint = _html_input_fingerprint(song_root, diff_id, offset)
+    build_cache.update("analysis_html", final_fingerprint, [out_path])
+    build_cache.save()
     print(f'  ✓ {out_path}')
     return str(out_path)
 
@@ -2533,29 +2887,14 @@ def available_chart_difficulties(song_dir):
     return default_target_difficulties(parse_maidata(maidata).charts)
 
 
-def output_needs_regeneration(song_dir, difficulty, out_path, force=False):
-    if force or not os.path.exists(out_path):
+def output_needs_regeneration(
+    song_dir, difficulty, out_path, force=False, offset=0.0,
+):
+    if force:
         return True
-    try:
-        with open(out_path, "r", encoding="utf-8") as generated:
-            head = generated.read(4096)
-        if f'data-renderer-version="{PLAYER_RENDERER_VERSION}"' not in head:
-            return True
-    except OSError:
-        return True
-    input_paths = [
-        meter_file_path(song_dir, difficulty),
-        offset_file_path(song_dir, difficulty),
-        legacy_difficulty_path(song_dir, difficulty, '_offset.txt'),
-    ]
-    try:
-        output_mtime = Path(out_path).stat().st_mtime_ns
-        return any(
-            Path(path).is_file() and Path(path).stat().st_mtime_ns > output_mtime
-            for path in input_paths
-        )
-    except OSError:
-        return True
+    cache = BuildCache(song_dir, difficulty)
+    fingerprint = _html_input_fingerprint(song_dir, difficulty, offset)
+    return not cache.matches("analysis_html", fingerprint, [out_path])
 
 
 def main():
@@ -2591,11 +2930,15 @@ def main():
             continue
         for difficulty in difficulties:
             out_path = analysis_html_path(sd, difficulty)
-            if not output_needs_regeneration(sd, difficulty, out_path, args.force):
+            if not output_needs_regeneration(
+                sd, difficulty, out_path, args.force, args.offset,
+            ):
                 print(f'  [{sid}] 已有 {out_path.relative_to(sd)}, 跳过 (-f 强制)')
                 continue
             try:
-                if generate_html(sd, sid, difficulty, args.offset) is None:
+                if generate_html(
+                    sd, sid, difficulty, args.offset, force=args.force,
+                ) is None:
                     failures += 1
             except Exception as e:
                 import traceback

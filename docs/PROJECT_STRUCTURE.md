@@ -23,6 +23,7 @@
 实际实现代码都在 `mra/`：
 
 - `mra/run_all.py`
+- `mra/build_cache.py`
 - `mra/visualize.py`
 - `mra/render_preview.py`
 - `mra/align_audio.py`

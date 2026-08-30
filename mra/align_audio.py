@@ -10,23 +10,27 @@
   python align_audio.py -d "WiPE OUT MEMORIES" -diff 4 # 指定难度
 """
 import argparse
+import json
 import math
 import os
 import subprocess
 import sys
 import tempfile
 import wave
+from pathlib import Path
 import numpy as np
 from scipy import signal
 from scipy.ndimage import uniform_filter1d
 
 from .simai_parser import parse_maidata
-from .visualize import compute_rhythm_events
+from .visualize import AnalysisContext, compute_rhythm_events
 from .difficulty import (DIFFICULTY_NAMES, default_target_difficulties,
                          find_preview_video, offset_file_path, preview_video_candidates)
 from .song_library import PROJECT_ROOT, find_song_dirs
+from .build_cache import file_fingerprint, fingerprint_digest, media_fingerprint
 
 ALIGN_SAMPLE_RATE = 22050  # 提高采样率减少量化误差 (原 16000)
+ALIGNMENT_CACHE_REVISION = 1
 
 
 def write_offset_file(path, offset):
@@ -43,6 +47,74 @@ def write_offset_file(path, offset):
     try:
         with os.fdopen(handle, 'w', encoding='utf-8', newline='\n') as stream:
             stream.write(f'{value:.4f}\n')
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(temporary, output)
+    finally:
+        if os.path.exists(temporary):
+            os.remove(temporary)
+
+
+def alignment_cache_path(offset_path: str | Path) -> Path:
+    return Path(offset_path).with_name("alignment.json")
+
+
+def _alignment_fingerprint(
+    maidata: str | Path,
+    video_path: str | Path,
+    track_path: str | Path,
+    difficulty: int,
+) -> tuple[str, dict]:
+    inputs = {
+        "revision": ALIGNMENT_CACHE_REVISION,
+        "difficulty": int(difficulty),
+        "sample_rate": ALIGN_SAMPLE_RATE,
+        "maidata": file_fingerprint(maidata),
+        "preview": media_fingerprint(video_path),
+        "track": media_fingerprint(track_path),
+    }
+    return fingerprint_digest(inputs), inputs
+
+
+def _read_cached_alignment(
+    offset_path: str | Path,
+    fingerprint: str,
+) -> float | None:
+    output = Path(offset_path)
+    metadata = alignment_cache_path(output)
+    try:
+        value = float(output.read_text(encoding="utf-8").strip())
+        data = json.loads(metadata.read_text(encoding="utf-8"))
+    except (OSError, ValueError, TypeError):
+        return None
+    if (
+        not math.isfinite(value)
+        or not isinstance(data, dict)
+        or data.get("fingerprint") != fingerprint
+    ):
+        return None
+    return value
+
+
+def _write_alignment_cache(
+    offset_path: str | Path,
+    fingerprint: str,
+    inputs: dict,
+) -> None:
+    output = alignment_cache_path(offset_path)
+    output.parent.mkdir(parents=True, exist_ok=True)
+    handle, temporary = tempfile.mkstemp(
+        prefix=f".{output.name}.", suffix=".tmp", dir=output.parent,
+    )
+    try:
+        with os.fdopen(handle, "w", encoding="utf-8", newline="\n") as stream:
+            json.dump(
+                {"version": 1, "fingerprint": fingerprint, "inputs": inputs},
+                stream,
+                ensure_ascii=False,
+                indent=2,
+            )
+            stream.write("\n")
             stream.flush()
             os.fsync(stream.fileno())
         os.replace(temporary, output)
@@ -176,7 +248,8 @@ def estimate_track_offset(video_audio, track_audio, sr, min_lag=-15.0, max_lag=4
     return coarse_samples / sr, confidence
 
 
-def align_song(song_dir, song_id, diff_id=5, force=False):
+def align_song(song_dir, song_id, diff_id=5, force=False, *,
+               analysis: AnalysisContext | None = None):
     diff_name = DIFFICULTY_NAMES.get(diff_id, diff_id)
     video_name = find_preview_video(song_dir, diff_id)
     video_path = os.path.join(song_dir, video_name) if video_name else None
@@ -185,15 +258,6 @@ def align_song(song_dir, song_id, diff_id=5, force=False):
     offset_file = offset_file_path(song_dir, diff_id)
     offset_file.parent.mkdir(parents=True, exist_ok=True)
 
-    if offset_file.is_file() and not force:
-        try:
-            existing_offset = float(offset_file.read_text(encoding='utf-8').strip())
-        except (OSError, ValueError):
-            print(f'  [{song_id}] 已有音频偏移无效，重新对齐')
-        else:
-            print(f'  [{song_id}] 已有音频偏移 {existing_offset:+.4f}s，跳过')
-            return existing_offset
-
     if not video_path:
         print(f'  [{song_id}] 无 {preview_video_candidates(diff_id)[0]}')
         return None
@@ -201,13 +265,26 @@ def align_song(song_dir, song_id, diff_id=5, force=False):
         print(f'  [{song_id}] 无 maidata.txt')
         return None
 
+    fingerprint, fingerprint_inputs = _alignment_fingerprint(
+        maidata, video_path, track_path, diff_id,
+    )
+    if offset_file.is_file() and not force:
+        existing_offset = _read_cached_alignment(offset_file, fingerprint)
+        if existing_offset is not None:
+            print(
+                f'  [{song_id}] 音频输入未变化，复用偏移 '
+                f'{existing_offset:+.4f}s',
+            )
+            return existing_offset
+        print(f'  [{song_id}] 音频输入或对齐算法已变化，重新对齐')
+
     # 谱面首个音符时间 (相对谱面开始)
-    song = parse_maidata(maidata)
+    song = analysis.song if analysis is not None else parse_maidata(maidata)
     if diff_id not in song.charts:
         print(f'  [{song_id}] 无难度 {diff_name}')
         return None
     ch = song.charts[diff_id]
-    ev = compute_rhythm_events(ch)
+    ev = analysis.events if analysis is not None else compute_rhythm_events(ch)
     if not ev:
         print(f'  [{song_id}] 无音符')
         return None
@@ -256,6 +333,7 @@ def align_song(song_dir, song_id, diff_id=5, force=False):
     print(f'  [{song_id}] VIDEO_OFFSET = {offset:+.3f}s')
 
     write_offset_file(offset_file, offset)
+    _write_alignment_cache(offset_file, fingerprint, fingerprint_inputs)
     print(f'  [{song_id}] 已保存 {offset_file.relative_to(song_dir)}')
     return offset
 

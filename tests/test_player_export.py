@@ -171,20 +171,29 @@ class PlayerExportTests(unittest.TestCase):
             self.assertEqual(lines[0]["event"], "started")
             self.assertEqual(lines[-1]["event"], "completed")
 
-    def test_backend_full_analysis_realigns_even_when_offset_exists(self):
+    def test_backend_full_analysis_reuses_context_and_alignment_cache_by_default(self):
         with tempfile.TemporaryDirectory() as tmp:
             song = self.make_song(Path(tmp))
             with mock.patch.object(desktop_backend, "init_meter"), \
                  mock.patch.object(desktop_backend, "visualize_song", return_value={}), \
                  mock.patch.object(desktop_backend, "find_preview_video", return_value="preview.mp4"), \
                  mock.patch.object(desktop_backend, "align_song", return_value=0.25) as align_song, \
-                 mock.patch.object(desktop_backend, "generate_html", return_value=Path("analysis.html")), \
-                 mock.patch.object(desktop_backend, "export_player", return_value=Path("manifest.json")):
+                 mock.patch.object(desktop_backend, "generate_html", return_value=Path("analysis.html")) as generate_html, \
+                 mock.patch.object(desktop_backend, "export_player", return_value=Path("manifest.json")) as export:
                 result = desktop_backend.analyze(song, 5, force=False, timeout=900)
 
             self.assertEqual(result, Path("manifest.json"))
-            align_song.assert_called_once_with(
-                str(song), song.name, 5, force=True,
+            align_song.assert_called_once()
+            self.assertEqual(align_song.call_args.args, (str(song), song.name, 5))
+            self.assertFalse(align_song.call_args.kwargs["force"])
+            analysis = align_song.call_args.kwargs["analysis"]
+            self.assertIs(
+                generate_html.call_args.kwargs["analysis"],
+                analysis,
+            )
+            self.assertIs(
+                export.call_args.kwargs["analysis"],
+                analysis,
             )
 
 

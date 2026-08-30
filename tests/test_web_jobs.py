@@ -10,6 +10,21 @@ from mra.web_jobs import AnalysisJob, JobManager
 
 
 class JobManagerShutdownTests(unittest.TestCase):
+    def test_completed_step_duration_is_exposed_in_job_payload(self):
+        manager = JobManager(Path.cwd())
+        job = AnalysisJob("timed", Path.cwd(), 5, False)
+
+        manager._apply_event(job, {
+            "event": "step",
+            "name": "rhythm",
+            "status": "completed",
+            "duration_sec": 1.234567,
+        })
+
+        self.assertEqual(job.timings, {"rhythm": 1.234567})
+        self.assertEqual(job.to_dict()["timings"], {"rhythm": 1.234567})
+        manager.shutdown()
+
     def test_shutdown_cancels_pending_work_and_stops_active_process(self):
         manager = JobManager(Path.cwd())
         queued = AnalysisJob("queued", Path.cwd(), 5, False)

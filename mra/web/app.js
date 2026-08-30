@@ -459,6 +459,12 @@ async function startJob() {
 function renderJob(job) {
   $("progressBar").style.width = `${Math.round(job.progress * 100)}%`;
   $("jobStatus").textContent = `${job.status} · ${job.step || "等待"}`;
+  const timings = Object.entries(job.timings || {});
+  const timingNode = $("jobTimings");
+  timingNode.textContent = timings.length
+    ? `步骤耗时：${timings.map(([name, seconds]) => `${name} ${Number(seconds).toFixed(3)}s`).join(" · ")}`
+    : "";
+  timingNode.classList.toggle("hidden", timings.length === 0);
   $("jobLog").textContent = job.logs.join("\n");
   $("jobLog").scrollTop = $("jobLog").scrollHeight;
 }

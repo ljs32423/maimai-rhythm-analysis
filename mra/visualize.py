@@ -16,11 +16,13 @@ maimai 谱面节奏可视化 v2 — ArcaeaRhythmAnalysis 风格
 受 ArcaeaRhythmAnalysis (RydIShihara) 3.py 启发。
 """
 
-import sys, os, math, argparse, html
+import sys, os, math, argparse, html, time
 from collections import Counter
+from dataclasses import dataclass, field
 from fractions import Fraction
 from itertools import combinations
 from pathlib import Path
+from typing import Any
 
 import numpy as np
 import warnings
@@ -39,6 +41,7 @@ from .difficulty import (DIFFICULTY_NAMES, default_target_difficulties,
 from .meter import MeterMap, ensure_meter_file
 from .song_library import PROJECT_ROOT, find_song_dirs
 from .sweep_marks import apply_sweep_maidata, ensure_sweep_maidata
+from .build_cache import BuildCache, file_fingerprint, fingerprint_digest
 
 # ============ 全局样式 ============
 # 尝试加载中文字体
@@ -713,11 +716,12 @@ def ensure_sweep_maidata_for_song(song_dir: str | Path,
 PX_PER_BEAT = 108         # 每拍像素宽度 (16分间距=27px，与节奏点外径相切)
 PAD_X = 320               # 左侧额外预留空带，避免前端初始对齐时露出容器黑底
 SEGMENT_BEATS = 8         # 控制 GPU 纹理宽度；在高 DPI 屏上也避免超大纹理分块卡顿
-# 分段右侧内容出血宽度：相邻两段绘制完全相同的 2px 重叠内容，
-# 覆盖各自边缘的半透明抗锯齿像素，消除拼接处的亮缝。
-STRIP_SEGMENT_BLEED_PX = 2
+# 分段两侧内容出血宽度。边界落在小数物理像素时 Chromium 可能仍会
+# 暴露单侧纹理的透明边，因此相邻两段都跨过逻辑边界绘制相同内容。
+STRIP_SEGMENT_BLEED_PX = 4
 # 分段 SVG 格式标记：前端据此识别旧格式分段并自动重建。
-STRIP_SEGMENT_MARKER = "<!-- mra-strip-seg:v2 -->"
+STRIP_SEGMENT_MARKER = "<!-- mra-strip-seg:v3 -->"
+VISUAL_BUILD_REVISION = 1
 NOTE_R = 11.5             # 节奏点填充半径；外环与填充之间保留 1px 黑色间隔
 NOTE_RING_GAP = 1.0       # 节奏点填充与外环之间的黑色间隔
 NOTE_RING_W = 1.0         # 节奏点外环宽度（不影响终点空心圆）
@@ -1038,6 +1042,90 @@ def build_primitives(events, row_beats, total_beats, bpm, chart, meter_map=None)
     return prims, n_rows
 
 
+@dataclass
+class AnalysisContext:
+    """Immutable analysis inputs plus memoized layout results for one chart."""
+
+    song_dir: Path
+    difficulty: int
+    song: SongData
+    chart: Chart
+    events: list[dict]
+    sweep_result: Any
+    timings: dict[str, float] = field(default_factory=dict)
+    _primitive_cache: dict[tuple, tuple[list[tuple], int]] = field(
+        default_factory=dict, repr=False,
+    )
+
+    def primitives(
+        self,
+        row_beats: int,
+        total_beats: float,
+        meter_map: MeterMap,
+    ) -> tuple[list[tuple], int]:
+        meter_key = tuple(
+            (round(float(section["start_beat"]), 9), section["signature"])
+            for section in meter_map.signature_sections()
+        )
+        key = (
+            int(row_beats),
+            round(float(total_beats), 9),
+            round(float(self.song.bpm), 9),
+            meter_key,
+        )
+        cached = self._primitive_cache.get(key)
+        if cached is not None:
+            return cached
+        started = time.perf_counter()
+        built = build_primitives(
+            self.events,
+            row_beats,
+            total_beats,
+            self.song.bpm,
+            self.chart,
+            meter_map,
+        )
+        self.timings["primitive_layout"] = (
+            self.timings.get("primitive_layout", 0.0)
+            + time.perf_counter() - started
+        )
+        self._primitive_cache[key] = built
+        return built
+
+
+def prepare_analysis_context(
+    song_dir: str | Path,
+    difficulty: int,
+    *,
+    song: SongData | None = None,
+) -> AnalysisContext:
+    """Parse and classify a chart once for all consumers in one job."""
+    song_root = Path(song_dir).resolve()
+    timings: dict[str, float] = {}
+    if song is None:
+        started = time.perf_counter()
+        song = parse_maidata(str(song_root / "maidata.txt"))
+        timings["parse"] = time.perf_counter() - started
+    if difficulty not in song.charts:
+        raise ValueError(f"歌曲中没有难度 {difficulty}")
+    chart = song.charts[difficulty]
+    started = time.perf_counter()
+    events = compute_rhythm_events(chart)
+    timings["rhythm_events"] = time.perf_counter() - started
+    started = time.perf_counter()
+    sweep_result = apply_sweep_maidata(events, song_root, difficulty)
+    timings["sweep_marks"] = time.perf_counter() - started
+    return AnalysisContext(
+        song_dir=song_root,
+        difficulty=int(difficulty),
+        song=song,
+        chart=chart,
+        events=events,
+        sweep_result=sweep_result,
+        timings=timings,
+    )
+
+
 def _label_style(lbl, nv):
     if lbl.endswith('.'):
         return ('#dd1313', 'bold', 'normal')
@@ -1085,10 +1173,19 @@ def _fit_label_font_sizes(events):
 # ============ SVG 渲染 (长条, 可滚动) ============
 
 def render_strip_svg(events, total_beats, bpm, chart, out_path, title,
-                     row_beats=None, compact=False, meter_map=None):
+                     row_beats=None, compact=False, meter_map=None,
+                     primitives=None, n_rows=None):
     if row_beats is None:
         row_beats = int(math.ceil(total_beats))  # 不折叠, 单条超长
-    prims, n_rows = build_primitives(events, row_beats, total_beats, bpm, chart, meter_map)
+    if primitives is None:
+        prims, computed_rows = build_primitives(
+            events, row_beats, total_beats, bpm, chart, meter_map,
+        )
+        n_rows = computed_rows
+    else:
+        prims = primitives
+        if n_rows is None:
+            n_rows = max(1, int(math.ceil(total_beats / row_beats)))
     W = row_width_px(row_beats)
     if compact:
         # 紧凑模式: 音符区 + 标注区 (无标题/行间距), 用于网页滚动
@@ -1160,7 +1257,8 @@ def migrate_legacy_visual_outputs(song_dir, difficulty_id, force=False):
 
 
 def render_strip_svg_segments(events, total_beats, bpm, chart, base_path,
-                              segment_beats=SEGMENT_BEATS, meter_map=None):
+                              segment_beats=SEGMENT_BEATS, meter_map=None,
+                              primitives=None, primitive_index=None):
     """Render compact long-strip SVG segments for frontend virtualization.
 
     The full compact strip SVG is still generated as a fallback/debug artifact.
@@ -1168,12 +1266,18 @@ def render_strip_svg_segments(events, total_beats, bpm, chart, base_path,
     position it at its natural x offset without losing vector clarity.
     """
     row_beats = int(math.ceil(total_beats))
-    prims, _ = build_primitives(events, row_beats, total_beats, bpm, chart, meter_map)
+    if primitives is None:
+        prims, _ = build_primitives(
+            events, row_beats, total_beats, bpm, chart, meter_map,
+        )
+    else:
+        prims = primitives
     full_width = row_width_px(row_beats)
     height = NOTE_AREA_H + LABEL_GAP + LABEL_AREA_H
     content_start = PAD_X
     segment_width = segment_beats * PX_PER_BEAT
     segment_count = max(1, int(math.ceil(total_beats / segment_beats)))
+    spatial_index = primitive_index or _PrimitiveSpatialIndex(prims, segment_width)
 
     directory = os.path.dirname(base_path) or '.'
     prefix = os.path.basename(base_path) + '_seg_'
@@ -1184,26 +1288,42 @@ def render_strip_svg_segments(events, total_beats, bpm, chart, base_path,
             except OSError:
                 pass
 
-    for index in range(segment_count):
-        if index == 0:
-            x0 = 0
-            x1 = min(full_width, content_start + segment_width)
+    for segment_index in range(segment_count):
+        if segment_index == 0:
+            nominal_x0 = 0
+            nominal_x1 = min(full_width, content_start + segment_width)
         else:
-            x0 = content_start + index * segment_width
-            x1 = min(full_width, content_start + (index + 1) * segment_width)
-        if index < segment_count - 1:
-            # 非末段向右多画 2px：与下一段开头完全相同的重叠内容，
-            # 让浏览器合成时边缘半透明像素被同内容覆盖，避免拼接亮缝。
-            x1 = min(full_width, x1 + STRIP_SEGMENT_BLEED_PX)
+            nominal_x0 = content_start + segment_index * segment_width
+            nominal_x1 = min(
+                full_width,
+                content_start + (segment_index + 1) * segment_width,
+            )
+        # 两侧都出血，使真正的逻辑接缝落在两张纹理内部。仅右侧出血时，
+        # 后一张图片的透明左边缘仍可能在小数缩放下露出亮线。
+        x0 = max(0, nominal_x0 - (STRIP_SEGMENT_BLEED_PX if segment_index else 0))
+        x1 = min(
+            full_width,
+            nominal_x1 + (STRIP_SEGMENT_BLEED_PX if segment_index < segment_count - 1 else 0),
+        )
         width = max(1, x1 - x0)
-        out_path = f'{base_path}_seg_{index:03d}.svg'
+        out_path = f'{base_path}_seg_{segment_index:03d}.svg'
         parts = [
             f'<svg xmlns="http://www.w3.org/2000/svg" width="{width}" height="{height}" '
             f'viewBox="{x0} 0 {width} {height}" font-family="{SVG_TEXT_FONT_STACK}">',
             STRIP_SEGMENT_MARKER,
         ]
-        parts.append(f'<rect x="{x0:.2f}" y="0" width="{width:.2f}" height="{height:.2f}" fill="#0a0a14"/>')
-        for p in prims:
+        # Extend the opaque bands past the clipped viewBox.  This avoids a
+        # half-transparent raster edge even when the image lands on a fractional
+        # device pixel after the player's 1.8x scale.
+        parts.append(
+            f'<rect x="{x0 - 1:.2f}" y="-1" width="{width + 2:.2f}" '
+            f'height="{NOTE_AREA_H + LABEL_GAP + 2:.2f}" fill="#0a0a14"/>'
+        )
+        parts.append(
+            f'<rect x="{x0 - 1:.2f}" y="{NOTE_AREA_H + LABEL_GAP:.2f}" '
+            f'width="{width + 2:.2f}" height="{LABEL_AREA_H + 2:.2f}" fill="#ffffff"/>'
+        )
+        for p in spatial_index.query(x0, x1, padding=80):
             bounds = _prim_x_bounds(p)
             if bounds is None or (bounds[1] >= x0 - 80 and bounds[0] <= x1 + 80):
                 if p[0] in ('rect', 'line', 'dot', 'circle', 'diamond', 'diamond_ring', 'star', 'tri', 'ring', 'text'):
@@ -1244,6 +1364,33 @@ def _prim_x_bounds(p):
         half = max(8, len(str(txt)) * size * 0.42)
         return (x - half, x + half)
     return None
+
+
+class _PrimitiveSpatialIndex:
+    """Bucket primitives by x while preserving the original painter order."""
+
+    def __init__(self, primitives, bucket_width):
+        self.primitives = primitives
+        self.bucket_width = max(1.0, float(bucket_width))
+        self.buckets: dict[int, list[int]] = {}
+        self.unbounded: list[int] = []
+        for order, primitive in enumerate(primitives):
+            bounds = _prim_x_bounds(primitive)
+            if bounds is None:
+                self.unbounded.append(order)
+                continue
+            first = math.floor(bounds[0] / self.bucket_width)
+            last = math.floor(bounds[1] / self.bucket_width)
+            for bucket in range(first, last + 1):
+                self.buckets.setdefault(bucket, []).append(order)
+
+    def query(self, x0, x1, *, padding=0.0):
+        first = math.floor((x0 - padding) / self.bucket_width)
+        last = math.floor((x1 + padding) / self.bucket_width)
+        orders = set(self.unbounded)
+        for bucket in range(first, last + 1):
+            orders.update(self.buckets.get(bucket, ()))
+        return [self.primitives[order] for order in sorted(orders)]
 
 
 def _prim_to_svg(p, yoff):
@@ -1298,8 +1445,17 @@ def _prim_to_svg(p, yoff):
 # ============ matplotlib 折叠 PNG 渲染 ============
 
 def render_strip_png(events, total_beats, bpm, chart, out_path, title,
-                     row_beats=ROW_BEATS_DEFAULT, dpi=150, meter_map=None):
-    prims, n_rows = build_primitives(events, row_beats, total_beats, bpm, chart, meter_map)
+                     row_beats=ROW_BEATS_DEFAULT, dpi=150, meter_map=None,
+                     primitives=None, n_rows=None):
+    if primitives is None:
+        prims, computed_rows = build_primitives(
+            events, row_beats, total_beats, bpm, chart, meter_map,
+        )
+        n_rows = computed_rows
+    else:
+        prims = primitives
+        if n_rows is None:
+            n_rows = max(1, int(math.ceil(total_beats / row_beats)))
     W = row_width_px(row_beats)
     H = n_rows * ROW_H + 26
     fig_w = W / 100.0
@@ -1429,7 +1585,15 @@ def visual_output_needs_regeneration(output: str | Path,
     except OSError:
         return True
 
-def process_song(song_dir, song_id, force=False, difficulties=None):
+def process_song(
+    song_dir,
+    song_id,
+    force=False,
+    difficulties=None,
+    *,
+    contexts: dict[int, AnalysisContext] | None = None,
+    song: SongData | None = None,
+):
     """
     处理单首歌曲: 读取 maidata.txt → 解析谱面 → 输出 SVG/PNG。
     输出四类文件:
@@ -1441,23 +1605,31 @@ def process_song(song_dir, song_id, force=False, difficulties=None):
     mp = os.path.join(song_dir, 'maidata.txt')
     if not os.path.exists(mp):
         return {'song_id': song_id, 'error': 'no maidata.txt'}
+    parse_started = time.perf_counter()
     try:
-        song = parse_maidata(mp)
+        song = song or parse_maidata(mp)
     except Exception as e:
         return {'song_id': song_id, 'error': f'parse: {e}'}
+    parse_seconds = time.perf_counter() - parse_started
 
     selected_difficulties = (sorted(song.charts) if difficulties is None
                              else [did for did in difficulties if did in song.charts])
     stats = {'song_id': song_id, 'title': song.title, 'artist': song.artist,
-             'bpm': song.bpm, 'difficulties': {}, 'errors': []}
+             'bpm': song.bpm, 'difficulties': {}, 'errors': [],
+             'timings': {'parse': parse_seconds}}
     for did in selected_difficulties:
-        ch = song.charts[did]
+        context = contexts.get(did) if contexts is not None else None
+        if context is None:
+            context = prepare_analysis_context(song_dir, did, song=song)
+            if contexts is not None:
+                contexts[did] = context
+        ch = context.chart
         if not ch.notes:
             continue
         migrate_legacy_visual_outputs(song_dir, did, force=force)
         segment_base = strip_segment_base_path(song_dir, did)
-        events = compute_rhythm_events(ch)
-        sweep_result = apply_sweep_maidata(events, song_dir, did)
+        events = context.events
+        sweep_result = context.sweep_result
         if sweep_result.created:
             relative = sweep_result.path.relative_to(Path(song_dir))
             print(f'  [{song_id}] 已创建人工扫键标记文件 {relative}')
@@ -1466,16 +1638,25 @@ def process_song(song_dir, song_id, force=False, difficulties=None):
         # 先读取或初始化拍号文件，让所有输出共用同一份人工小节时间轴。
         last_note_beat = time_to_beat(max(n.time_sec for n in ch.notes), ch.bpm_timeline)
         meter_path = meter_file_path(song_dir, did)
-        meter_existed = meter_path.is_file()
         meter_map = ensure_meter_file(song_dir, did, last_note_beat)
-        # 首次为旧产物补默认 4/4 模板时，旧图本来就是 4/4，
-        # 不因新建文件的 mtime 做一次无意义重绘。已有 meter.json
-        # 则是真正的人工输入，它比产物新时必须重建。
-        visual_dependencies = (meter_path,) if meter_existed else ()
         folded_total_beats = meter_map.add_measures(last_note_beat, 1)
         long_total_beats = meter_map.add_measures(
             folded_total_beats, LONG_IMAGE_EXTRA_MEASURES,
         )
+        cache = BuildCache(song_dir, did)
+        common_fingerprint = {
+            'revision': VISUAL_BUILD_REVISION,
+            'difficulty': did,
+            'maidata': file_fingerprint(mp),
+            'sweep': file_fingerprint(sweep_result.path),
+            'meter': file_fingerprint(meter_path),
+            'folded_total_beats': round(folded_total_beats, 9),
+            'long_total_beats': round(long_total_beats, 9),
+        }
+
+        def artifact_fingerprint(name: str) -> str:
+            return fingerprint_digest({**common_fingerprint, 'artifact': name})
+
         # BPM 摘要文本
         chart_bpms = sorted({value for _, value in ch.bpm_timeline})
         bpm_summary = (f'BPM {chart_bpms[0]:g}' if len(chart_bpms) == 1 else
@@ -1485,55 +1666,105 @@ def process_song(song_dir, song_id, force=False, difficulties=None):
         # 1) 完整长条 SVG (不折叠, 含标题+标注)
         rhythm_svg = rhythm_svg_path(song_dir, did)
         rhythm_svg.parent.mkdir(parents=True, exist_ok=True)
-        if visual_output_needs_regeneration(
-            rhythm_svg, visual_dependencies, force,
-        ):
-            try:
-                render_strip_svg(events, long_total_beats, song.bpm, ch,
-                                 str(rhythm_svg), title, meter_map=meter_map)
-            except Exception as e:
-                print(f'    SVG warn: {e}')
-                stats['errors'].append(f'{did} rhythm SVG: {e}')
+        rhythm_svg_fp = artifact_fingerprint('rhythm_svg')
+        rebuild_rhythm_svg = force or not cache.matches(
+            'rhythm_svg', rhythm_svg_fp, [rhythm_svg],
+        )
         # 2) 紧凑 SVG (仅音符+标注区, 无标题/行间距, 用于 make_html.py 嵌入)
         strip_svg = strip_svg_path(song_dir, did)
         strip_svg.parent.mkdir(parents=True, exist_ok=True)
-        if visual_output_needs_regeneration(
-            strip_svg, visual_dependencies, force,
-        ):
+        strip_svg_fp = artifact_fingerprint('strip_svg')
+        rebuild_strip_svg = force or not cache.matches(
+            'strip_svg', strip_svg_fp, [strip_svg],
+        )
+        # 2.5) 紧凑 SVG 分段 (前端优先加载；完整 strip 作为 fallback)
+        segment_base.parent.mkdir(parents=True, exist_ok=True)
+        expected_segments = [Path(path) for path in strip_segment_paths(
+            str(segment_base), long_total_beats,
+        )]
+        segments_fp = artifact_fingerprint('strip_segments')
+        rebuild_segments = force or not cache.matches(
+            'strip_segments', segments_fp, expected_segments,
+        )
+
+        long_primitives = None
+        long_n_rows = None
+        if rebuild_rhythm_svg or rebuild_strip_svg or rebuild_segments:
+            row_beats = int(math.ceil(long_total_beats))
+            long_primitives, long_n_rows = context.primitives(
+                row_beats, long_total_beats, meter_map,
+            )
+
+        render_timings: dict[str, float] = {}
+        if rebuild_rhythm_svg:
+            started = time.perf_counter()
             try:
                 render_strip_svg(events, long_total_beats, song.bpm, ch,
-                                 str(strip_svg), title, compact=True, meter_map=meter_map)
+                                 str(rhythm_svg), title, meter_map=meter_map,
+                                 primitives=long_primitives, n_rows=long_n_rows)
+                cache.update('rhythm_svg', rhythm_svg_fp, [rhythm_svg])
+            except Exception as e:
+                print(f'    SVG warn: {e}')
+                stats['errors'].append(f'{did} rhythm SVG: {e}')
+            render_timings['rhythm_svg'] = time.perf_counter() - started
+        if rebuild_strip_svg:
+            started = time.perf_counter()
+            try:
+                render_strip_svg(events, long_total_beats, song.bpm, ch,
+                                 str(strip_svg), title, compact=True,
+                                 meter_map=meter_map, primitives=long_primitives,
+                                 n_rows=long_n_rows)
+                cache.update('strip_svg', strip_svg_fp, [strip_svg])
             except Exception as e:
                 print(f'    compact SVG warn: {e}')
                 stats['errors'].append(f'{did} strip SVG: {e}')
-        # 2.5) 紧凑 SVG 分段 (前端优先虚拟化加载；完整 strip 作为 fallback)
-        segment_base.parent.mkdir(parents=True, exist_ok=True)
-        expected_segments = strip_segment_paths(str(segment_base), long_total_beats)
-        if any(
-            visual_output_needs_regeneration(
-                path, visual_dependencies, force,
-            )
-            for path in expected_segments
-        ):
+            render_timings['strip_svg'] = time.perf_counter() - started
+        if rebuild_segments:
+            started = time.perf_counter()
             try:
                 render_strip_svg_segments(events, long_total_beats, song.bpm, ch,
-                                          str(segment_base), meter_map=meter_map)
+                                          str(segment_base), meter_map=meter_map,
+                                          primitives=long_primitives)
+                cache.update('strip_segments', segments_fp, expected_segments)
             except Exception as e:
                 print(f'    compact SVG segment warn: {e}')
                 stats['errors'].append(f'{did} strip SVG segments: {e}')
+            render_timings['strip_segments'] = time.perf_counter() - started
         # 3) 折叠 PNG (每32拍一行, 方便直接查看)
         rhythm_png = rhythm_png_path(song_dir, did)
         rhythm_png.parent.mkdir(parents=True, exist_ok=True)
-        if visual_output_needs_regeneration(
-            rhythm_png, visual_dependencies, force,
-        ):
+        rhythm_png_fp = artifact_fingerprint('rhythm_png')
+        rebuild_png = force or not cache.matches(
+            'rhythm_png', rhythm_png_fp, [rhythm_png],
+        )
+        if rebuild_png:
+            started = time.perf_counter()
             try:
+                folded_primitives, folded_n_rows = context.primitives(
+                    ROW_BEATS_DEFAULT, folded_total_beats, meter_map,
+                )
                 render_strip_png(events, folded_total_beats, song.bpm, ch,
-                                 str(rhythm_png), title, meter_map=meter_map)
+                                 str(rhythm_png), title, meter_map=meter_map,
+                                 primitives=folded_primitives,
+                                 n_rows=folded_n_rows)
+                cache.update('rhythm_png', rhythm_png_fp, [rhythm_png])
             except Exception as e:
                 print(f'    PNG warn: {e}')
                 stats['errors'].append(f'{did} rhythm PNG: {e}')
-        stats['difficulties'][did] = {'level': ch.level, 'notes': len(ch.notes)}
+            render_timings['rhythm_png'] = time.perf_counter() - started
+        cache.save()
+        difficulty_timings = {**context.timings, **render_timings}
+        stats['difficulties'][did] = {
+            'level': ch.level,
+            'notes': len(ch.notes),
+            'timings': difficulty_timings,
+        }
+        if difficulty_timings:
+            details = ', '.join(
+                f'{name}={seconds:.3f}s'
+                for name, seconds in difficulty_timings.items()
+            )
+            print(f'  [{song_id}] 计时: {details}')
     return stats
 
 

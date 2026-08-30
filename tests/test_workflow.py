@@ -3,6 +3,7 @@ import os
 import sys
 import tempfile
 import unittest
+import xml.etree.ElementTree as ET
 from pathlib import Path
 from unittest import mock
 
@@ -586,13 +587,23 @@ class WorkflowTests(unittest.TestCase):
             self.assertAlmostEqual(offset, 6.5)
             self.assertEqual(offset_file_path(root, 5).read_text(encoding="utf-8").strip(), "6.5000")
 
-    def test_audio_alignment_reuses_existing_offset_without_processing_media(self):
+    def test_audio_alignment_reuses_matching_fingerprint_without_processing_media(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
+            maidata = root / "maidata.txt"
+            preview = root / "MASTER_preview.mp4"
+            track = root / "track.mp3"
+            maidata.write_text(MAIDATA_WITH_REMASTER, encoding="utf-8")
+            preview.write_bytes(b"video")
+            track.write_bytes(b"track")
             output = offset_file_path(root, 5)
             output.parent.mkdir(parents=True)
             original = "1.2500\n"
             output.write_text(original, encoding="utf-8")
+            fingerprint, inputs = align_audio._alignment_fingerprint(
+                maidata, preview, track, 5,
+            )
+            align_audio._write_alignment_cache(output, fingerprint, inputs)
 
             with mock.patch.object(align_audio, "extract_audio_mono") as extract:
                 offset = align_audio.align_song(str(root), "test", diff_id=5, force=False)
@@ -600,6 +611,35 @@ class WorkflowTests(unittest.TestCase):
             self.assertEqual(offset, 1.25)
             self.assertEqual(output.read_text(encoding="utf-8"), original)
             extract.assert_not_called()
+
+    def test_audio_alignment_recalculates_when_media_fingerprint_changes(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            maidata = root / "maidata.txt"
+            preview = root / "MASTER_preview.mp4"
+            track = root / "track.mp3"
+            maidata.write_text(MAIDATA_WITH_REMASTER, encoding="utf-8")
+            preview.write_bytes(b"video")
+            track.write_bytes(b"track-old")
+            output = offset_file_path(root, 5)
+            output.parent.mkdir(parents=True)
+            output.write_text("1.2500\n", encoding="utf-8")
+            fingerprint, inputs = align_audio._alignment_fingerprint(
+                maidata, preview, track, 5,
+            )
+            align_audio._write_alignment_cache(output, fingerprint, inputs)
+            track.write_bytes(b"track-new")
+
+            song = mock.Mock(first_offset=1.5, charts={5: mock.Mock()})
+            audio = np.zeros(4000 * 12, dtype=np.float32)
+            with mock.patch.object(align_audio, "parse_maidata", return_value=song), \
+                 mock.patch.object(align_audio, "compute_rhythm_events", return_value=[{"time": 2.0}]), \
+                 mock.patch.object(align_audio, "extract_audio_mono", side_effect=[(audio, 4000), (audio, 4000)]) as extract, \
+                 mock.patch.object(align_audio, "estimate_track_offset", return_value=(5.0, 0.95)):
+                offset = align_audio.align_song(str(root), "test", diff_id=5)
+
+            self.assertEqual(offset, 6.5)
+            self.assertEqual(extract.call_count, 2)
 
     def test_forced_audio_alignment_atomically_overwrites_existing_offset(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -735,6 +775,81 @@ class WorkflowTests(unittest.TestCase):
             for p in primitives
         ))
 
+    def test_primitive_spatial_index_matches_full_scan_and_preserves_order(self):
+        primitives = [
+            ('rect', 0, 0, 50, 20, '#000', 1),
+            ('dot', 90, 10, 5, '#fff'),
+            ('line', 140, 0, 220, 0, '#fff', 2),
+            ('text', 260, 10, 'label', '#111', 12, 'bold', 'normal', 'middle'),
+            ('unknown',),
+        ]
+        index = visualize._PrimitiveSpatialIndex(primitives, 100)
+
+        for x0, x1, padding in [(0, 80, 0), (80, 160, 20), (210, 280, 10)]:
+            candidates = index.query(x0, x1, padding=padding)
+            filtered = [
+                primitive
+                for primitive in candidates
+                if (
+                    visualize._prim_x_bounds(primitive) is None
+                    or (
+                        visualize._prim_x_bounds(primitive)[1] >= x0 - padding
+                        and visualize._prim_x_bounds(primitive)[0] <= x1 + padding
+                    )
+                )
+            ]
+            expected = [
+                primitive
+                for primitive in primitives
+                if (
+                    visualize._prim_x_bounds(primitive) is None
+                    or (
+                        visualize._prim_x_bounds(primitive)[1] >= x0 - padding
+                        and visualize._prim_x_bounds(primitive)[0] <= x1 + padding
+                    )
+                )
+            ]
+            self.assertEqual(filtered, expected)
+
+    def test_segment_svg_uses_two_sided_bleed_without_logical_gap(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            chart = Chart(level=12, designer="Tester", bpm_timeline=[(0.0, 120.0)])
+            base = root / "strip"
+            visualize.render_strip_svg_segments(
+                [], 300, 120, chart, str(base), primitives=[],
+            )
+            first = ET.fromstring((root / "strip_seg_000.svg").read_text(encoding="utf-8"))
+            second_text = (root / "strip_seg_001.svg").read_text(encoding="utf-8")
+            second = ET.fromstring(second_text)
+            first_x, _first_y, first_width, _first_height = map(
+                float, first.attrib["viewBox"].split(),
+            )
+            second_x, _second_y, _second_width, _second_height = map(
+                float, second.attrib["viewBox"].split(),
+            )
+
+            self.assertAlmostEqual(
+                first_x + first_width - second_x,
+                visualize.STRIP_SEGMENT_BLEED_PX * 2,
+            )
+            self.assertIn(visualize.STRIP_SEGMENT_MARKER, second_text)
+
+    def test_analysis_context_reuses_long_layout_for_all_consumers(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "maidata.txt").write_text(MAIDATA_WITH_REMASTER, encoding="utf-8")
+            context = visualize.prepare_analysis_context(root, 6)
+            meter_map = MeterMap()
+            with mock.patch.object(
+                visualize, "build_primitives", wraps=visualize.build_primitives,
+            ) as build:
+                first = context.primitives(64, 64, meter_map)
+                second = context.primitives(64, 64, meter_map)
+
+            self.assertIs(first, second)
+            build.assert_called_once()
+
     def test_visualize_writes_safe_remaster_paths(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -754,7 +869,7 @@ class WorkflowTests(unittest.TestCase):
             segment_render.assert_called_once()
             self.assertFalse((root / "Re").exists())
 
-    def test_visualize_only_fills_missing_outputs_without_force(self):
+    def test_visualize_records_existing_outputs_then_skips_unchanged_content(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             (root / "maidata.txt").write_text(MAIDATA_WITH_REMASTER, encoding="utf-8")
@@ -773,13 +888,54 @@ class WorkflowTests(unittest.TestCase):
                  mock.patch.object(visualize, "render_strip_svg_segments") as segment_render:
                 visualize.process_song(str(root), "test", force=False)
 
-            svg_render.assert_not_called()
-            png_render.assert_not_called()
-            segment_render.assert_not_called()
+                self.assertEqual(svg_render.call_count, 2)
+                png_render.assert_called_once()
+                segment_render.assert_called_once()
+                svg_render.reset_mock()
+                png_render.reset_mock()
+                segment_render.reset_mock()
+
+                visualize.process_song(str(root), "test", force=False)
+
+                svg_render.assert_not_called()
+                png_render.assert_not_called()
+                segment_render.assert_not_called()
             self.assertTrue(rhythm_svg_path(root, 6).exists())
             self.assertTrue(strip_svg_path(root, 6).exists())
             self.assertTrue(rhythm_png_path(root, 6).exists())
             self.assertTrue((root / "outputs" / "ReMASTER" / "strip" / "segments" / "strip_seg_000.svg").exists())
+
+    def test_visualize_rebuilds_when_maidata_content_changes_even_with_older_mtime(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            maidata = root / "maidata.txt"
+            maidata.write_text(MAIDATA_WITH_REMASTER, encoding="utf-8")
+
+            def touch_svg(*args, **_kwargs):
+                Path(args[4]).touch()
+
+            def touch_png(*args, **_kwargs):
+                Path(args[4]).touch()
+
+            with mock.patch.object(visualize, "render_strip_svg", side_effect=touch_svg), \
+                 mock.patch.object(visualize, "render_strip_png", side_effect=touch_png), \
+                 mock.patch.object(visualize, "render_strip_svg_segments", wraps=visualize.render_strip_svg_segments):
+                visualize.process_song(str(root), "test", force=False)
+
+            maidata.write_text(
+                MAIDATA_WITH_REMASTER.replace("1,2,E", "1,2,3,E"),
+                encoding="utf-8",
+            )
+            os.utime(maidata, ns=(1_000_000_000, 1_000_000_000))
+
+            with mock.patch.object(visualize, "render_strip_svg", side_effect=touch_svg) as svg_render, \
+                 mock.patch.object(visualize, "render_strip_png", side_effect=touch_png) as png_render, \
+                 mock.patch.object(visualize, "render_strip_svg_segments", wraps=visualize.render_strip_svg_segments) as segment_render:
+                visualize.process_song(str(root), "test", force=False)
+
+            self.assertEqual(svg_render.call_count, 2)
+            png_render.assert_called_once()
+            segment_render.assert_called_once()
 
     def test_visualize_rebuilds_existing_outputs_when_meter_is_newer(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -885,8 +1041,10 @@ class WorkflowTests(unittest.TestCase):
             self.assertIn('function frameSvg(timestamp)', html)
             self.assertIn('rafSvg = requestAnimationFrame(frameSvg);', html)
             self.assertIn('function prepareSegmentsSvg()', html)
-            self.assertIn("image.decoding = 'sync';", html)
-            self.assertIn('virtualStripSvg.replaceChildren(fragment);', html)
+            self.assertIn("image.decoding = 'async';", html)
+            self.assertIn('function updateSegmentWindowSvg(videoTime)', html)
+            self.assertIn('URL.revokeObjectURL(record.objectUrl)', html)
+            self.assertNotIn('virtualStripSvg.replaceChildren(fragment);', html)
             self.assertIn("document.body.dataset.rendererMode = 'segmented-svg';", html)
             self.assertIn('class="virtual-strip"', html)
             self.assertNotIn('id="rhythmWebgl"', html)
@@ -1127,22 +1285,28 @@ class WorkflowTests(unittest.TestCase):
                 root, 5, html_path,
             ))
 
-    def test_html_skips_when_output_is_newer_than_offset(self):
+    def test_html_skips_unchanged_content_and_detects_older_changed_offset(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
-            html_path = root / "MASTER_analysis.html"
-            offset_path = root / "MASTER_offset.txt"
-            html_path.write_text(
-                f'<body data-renderer-version="{make_html.PLAYER_RENDERER_VERSION}">',
-                encoding="utf-8",
+            (root / "maidata.txt").write_text(MAIDATA_WITH_REMASTER, encoding="utf-8")
+            (root / "ReMASTER_strip.svg").write_text(
+                '<svg width="640" height="66"></svg>', encoding="utf-8",
             )
+            offset_path = offset_file_path(root, 6)
+            offset_path.parent.mkdir(parents=True, exist_ok=True)
             offset_path.write_text("5.0000\n", encoding="utf-8")
-            old_time = 1000
-            new_time = 2000
-            os.utime(offset_path, (old_time, old_time))
-            os.utime(html_path, (new_time, new_time))
+            html_path = Path(make_html.generate_html(str(root), "test", diff_id=6))
 
-            self.assertFalse(make_html.output_needs_regeneration(str(root), 5, str(html_path)))
+            self.assertFalse(make_html.output_needs_regeneration(root, 6, html_path))
+            os.utime(html_path, ns=(1_000_000_000, 1_000_000_000))
+            self.assertFalse(make_html.output_needs_regeneration(root, 6, html_path))
+            self.assertTrue(make_html.output_needs_regeneration(
+                root, 6, html_path, offset=0.125,
+            ))
+
+            offset_path.write_text("5.1250\n", encoding="utf-8")
+            os.utime(offset_path, ns=(500_000_000, 500_000_000))
+            self.assertTrue(make_html.output_needs_regeneration(root, 6, html_path))
 
     def test_html_render_loop_avoids_redundant_dom_work(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -1157,17 +1321,37 @@ class WorkflowTests(unittest.TestCase):
             output = make_html.generate_html(str(root), "test", diff_id=6)
             html = Path(output).read_text(encoding="utf-8")
 
-            # All segments are decoded before playback and remain mounted.
+            # Vector sources stay lossless, while only a time-based window is
+            # decoded and mounted as GPU textures.
             active = html.split(
                 '<script>\n// ===== 高性能分段 SVG 播放器 =====',
                 1,
             )[1]
             self.assertIn('function prepareSegmentsSvg()', html)
-            self.assertIn('virtualStripSvg.replaceChildren(fragment);', html)
+            self.assertIn('function updateSegmentWindowSvg(videoTime)', html)
+            self.assertIn('const mountedSegmentsSvg = new Map();', html)
+            self.assertIn('const segmentSourceBlobsSvg = new Map();', html)
+            self.assertIn("return response.blob();", html)
+            self.assertIn('URL.createObjectURL(blob)', html)
+            self.assertIn('URL.revokeObjectURL(record.objectUrl)', html)
             self.assertIn("image.loading = 'eager';", html)
-            self.assertIn("image.decoding = 'sync';", html)
-            self.assertIn('Promise.all(decodes)', html)
-            self.assertNotIn('function updateVisibleSegmentsSvg', html)
+            self.assertIn("image.decoding = 'async';", html)
+            self.assertIn('SEGMENT_LOOKAHEAD_SECONDS_SVG = 10;', html)
+            self.assertIn('SEGMENT_WINDOW_BEHIND_SVG = 2;', html)
+            self.assertNotIn('virtualStripSvg.replaceChildren(fragment);', html)
+
+            render_strip = active.split(
+                'function renderStripSvg(videoTime)', 1
+            )[1].split('function updateStatusSvg(', 1)[0]
+            self.assertNotIn('updateSegmentWindowSvg(', render_strip)
+            frame_loop = active.split(
+                'function frameSvg(timestamp)', 1
+            )[1].split('function stopFramesSvg()', 1)[0]
+            status_block = frame_loop.split(
+                'timestamp - lastStatusAtSvg >= STATUS_INTERVAL_SVG_MS', 1
+            )[1]
+            self.assertIn('updateSegmentWindowSvg(videoTime)', status_block)
+            self.assertEqual(frame_loop.count('updateSegmentWindowSvg('), 1)
 
             # The hot path is offloaded to a compositor-thread Web Animation.
             self.assertIn('function frameSvg(timestamp)', html)
@@ -1200,12 +1384,20 @@ class WorkflowTests(unittest.TestCase):
             self.assertIn('pvSvg.src = source.src;', active)
             self.assertNotIn('fetchWholeVideoSvg', active)
             self.assertNotIn('response.body.getReader()', active)
-            self.assertNotIn('new Blob(', active)
-            self.assertNotIn('URL.createObjectURL', active)
+            video_preload = active.split(
+                'async function prepareVideoSvg()', 1
+            )[1].split('function refreshAvailabilitySvg()', 1)[0]
+            self.assertNotIn('response.blob()', video_preload)
+            self.assertNotIn('URL.createObjectURL', video_preload)
             self.assertIn(
                 'const ready = pvReadySvg && segmentsReadySvg;',
                 active,
             )
+            self.assertIn("segmentResidentStrategy: 'windowed-vector'", html)
+            self.assertIn('mountedSegmentCount: mountedSegmentsSvg.size', html)
+            self.assertIn('segmentDecodeFailures: segmentDecodeFailureCountSvg', html)
+            self.assertIn('dataset.svgSegmentEvictions', html)
+            self.assertIn('dataset.svgSegmentDecodeFailures', html)
 
             # Buffering pauses the compositor clock, and every recovery plus
             # actually presented video frame reanchors it to the PV.
@@ -1710,7 +1902,7 @@ class WorkflowTests(unittest.TestCase):
                 html.index('"src": "../video/preview.mp4"'),
             )
 
-    def test_run_all_always_forces_audio_alignment(self):
+    def test_run_all_reuses_alignment_without_force(self):
         selected = [SongFolder(Path("song"), "song", "song")]
         with mock.patch.object(sys, "argv", ["run_all.py"]), \
              mock.patch.object(run_all, "discover_song_folders", return_value=selected), \
@@ -1720,7 +1912,7 @@ class WorkflowTests(unittest.TestCase):
         self.assertEqual(result, 0)
         self.assertEqual(
             [call.args[3] for call in run_step.call_args_list],
-            [False, False, False, True, False, False],
+            [False, False, False, False, False, False],
         )
         self.assertEqual(len(run_step.call_args_list), 6)
         self.assertEqual(run_step.call_args_list[1].args[2], ['-d', 'song', '-diff', '5'])
@@ -1781,14 +1973,16 @@ class WorkflowTests(unittest.TestCase):
             ['-d', 'Xaleid◆scopiX', '-diff', '6', '-offset', '0.0'],
         )
 
-    def test_run_step_returns_status_without_printing_child_output(self):
+    def test_run_step_returns_status_and_prints_only_its_timing(self):
         process = mock.Mock(returncode=0, stdout="child stdout", stderr="child stderr")
         with mock.patch.object(run_all.subprocess, "run", return_value=process), \
              mock.patch("builtins.print") as fake_print:
             ok = run_all.run_step("step", "script.py", [])
 
         self.assertTrue(ok)
-        fake_print.assert_not_called()
+        fake_print.assert_called_once()
+        self.assertIn("step 用时", fake_print.call_args.args[0])
+        self.assertNotIn("child stdout", fake_print.call_args.args[0])
 
     def test_run_all_prints_once_after_all_steps_of_a_difficulty_finish(self):
         selected = [SongFolder(Path("song"), "song", "song")]

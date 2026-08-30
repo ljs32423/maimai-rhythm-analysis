@@ -15,14 +15,15 @@ maimai 节奏解析 一键生成
   python run_all.py                            # 批量所有歌曲 (默认 MASTER/Re:MASTER)
   python run_all.py -d "WiPE OUT MEMORIES"     # 单曲
   python run_all.py -diff 4                    # 指定难度
-  python run_all.py -f                         # 强制重建可视化，保留人工配置与视频
+  python run_all.py -f                         # 强制重建并重新对齐，保留人工配置与视频
 
-每次完整处理都会强制重新计算音频延迟并覆盖对应的 offset.txt。
+媒体与谱面输入未变化时复用已有音频对齐；传入 -f 可强制重新计算。
 """
 import argparse
 import os
 import subprocess
 import sys
+import time
 from datetime import datetime
 from .difficulty import DIFFICULTY_NAMES, default_target_difficulties
 from .simai_parser import parse_maidata
@@ -50,6 +51,7 @@ def run_step(name, script, args_list, force=False):
         cmd = [sys.executable, '-m', script] + args_list
     if force and '-f' not in cmd:
         cmd.append('-f')
+    started = time.perf_counter()
     r = subprocess.run(
         cmd,
         cwd=str(PROJECT_ROOT),
@@ -58,6 +60,8 @@ def run_step(name, script, args_list, force=False):
         encoding='utf-8',
         errors='replace',
     )
+    elapsed = time.perf_counter() - started
+    print(f'[{timestamp_now()}] {name} 用时 {elapsed:.3f}s')
     if r.returncode != 0:
         if r.stdout:
             print(r.stdout, end='' if r.stdout.endswith('\n') else '\n')
@@ -75,7 +79,7 @@ def main():
                     help='难度 ID；不指定则默认只处理 MASTER/Re:MASTER')
     ap.add_argument(
         '-f', '--force', action='store_true',
-        help='强制重建可视化；保留扫键标记、拍号与视频',
+        help='强制重建可视化并重新对齐；保留扫键标记、拍号与视频',
     )
     ap.add_argument('-offset', '--offset', type=float, default=0.0, help='初始延迟 (秒)')
     args = ap.parse_args()
@@ -89,12 +93,11 @@ def main():
     common = ['-i', args.input] if args.input else []
 
     # 六个步骤: (名称, 脚本路径, 是否响应用户 -f, 是否附加 offset)
-    # 音频对齐无论用户是否传入 -f，每次完整处理都必须强制重新计算。
     steps = [
         ('1/6 拍号文件', 'mra.init_meter', False, False),
         ('2/6 节奏解析图片', 'mra.visualize', True, False),
         ('3/6 谱面预览视频', 'mra.render_preview', False, False),
-        ('4/6 音频自动对齐', 'mra.align_audio', False, False),
+        ('4/6 音频自动对齐', 'mra.align_audio', True, False),
         ('5/6 网页版预览', 'mra.make_html', True, True),
         ('6/6 桌面播放器数据', 'mra.export_player', True, False),
     ]
@@ -108,7 +111,7 @@ def main():
                 step_args = common + ['-d', song.path.name, '-diff', str(difficulty)]
                 if needs_offset:
                     step_args += ['-offset', str(args.offset)]
-                force = script == 'mra.align_audio' or (args.force and accept_force)
+                force = args.force and accept_force
                 step_ok = run_step(name, script, step_args, force)
                 diff_ok = diff_ok and step_ok
                 ok_all = ok_all and step_ok

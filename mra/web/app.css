@@ -149,6 +149,7 @@ textarea {
 .progress { height: 8px; border-radius: 999px; overflow: hidden; background: rgba(255,255,255,.08); }
 .progress span { display: block; width: 0; height: 100%; background: linear-gradient(90deg, var(--accent), var(--cyan)); transition: width .25s; }
 .job-line { display: flex; justify-content: space-between; align-items: center; margin: 12px 0; }
+.job-timings { margin: -4px 0 12px; color: #93a4c7; font-size: 0.86rem; line-height: 1.6; }
 .job-panel pre { max-height: 300px; overflow: auto; margin: 0; padding: 14px; border-radius: 12px; background: #05060a; color: #b9c2d8; white-space: pre-wrap; }
 .settings { padding: 18px; margin-top: 16px; }
 .settings .section-heading { margin-top: 0; }
